@@ -35,7 +35,7 @@ unit AsyncCalls;
   {$DEFINE DELPHI5_LOWER}
 {$ENDIF CONDITIONALEXPRESSIONS}
 
-{.$DEFINE DEBUGASYNCCALLS}
+{$DEFINE DEBUGASYNCCALLS}
 {$IFDEF DEBUGASYNCCALLS}
   {$D+}
 {$ENDIF DEBUGASYNCCALLS}
@@ -43,7 +43,7 @@ unit AsyncCalls;
 interface
 
 uses
-  Windows, SysUtils, Classes, Contnrs, ActiveX;
+  Windows, SysUtils, Classes, Contnrs, ActiveX, SyncObjs;
 
 type
   {$IFDEF DELPHI5_LOWER}
@@ -52,6 +52,8 @@ type
   TCdeclFunc = Pointer; // function(Arg1: Type1; Arg2: Type2; ...); cdecl;
   TCdeclMethod = TMethod; // function(Arg1: Type1; Arg2: Type2; ...) of object; cdecl;
   TLocalAsyncProc = function: Integer;
+  TLocalVclProc = procedure(Param: Integer);
+  TLocalAsyncForLoopProc = function(Index: Integer; SyncLock: TCriticalSection): Boolean;
 
   TAsyncCallArgObjectProc = function(Arg: TObject): Integer;
   TAsyncCallArgIntegerProc = function(Arg: Integer): Integer;
@@ -175,6 +177,9 @@ Example:
 }
 function LocalAsyncCall(LocalProc: TLocalAsyncProc): IAsyncCall;
 
+function AsyncMTForLoop(LocalProc: TLocalAsyncForLoopProc;
+  StartIndex, EndIndex: Integer; MaxThreads: Integer = 0): Boolean; // false if LoopBreak
+
 
 { AsyncCallEx() executes the given function/procedure in a separate thread. The
   Arg parameter can be a record type. The fields of the record can be modified
@@ -240,8 +245,8 @@ function AsyncCall(Proc: TCdeclMethod; const Args: array of const): IAsyncCall; 
                       The return value is zero when all async calls have finished.
                       Otherwise it is -1.
     WaitAll = False : The function returns when at least one of the async calls
-                      has finished. The return value is the the list index of
-                      the first finished async call. If there was a timeout, the
+                      has finished. The return value is the list index of the
+                      first finished async call. If there was a timeout, the
                       return value is -1.
     Milliseconds    : Specifies the number of milliseconds to wait until a
                       timeout happens. The value INFINITE lets the function wait
@@ -249,6 +254,8 @@ function AsyncCall(Proc: TCdeclMethod; const Args: array of const): IAsyncCall; 
 }
 function AsyncMultiSync(const List: array of IAsyncCall; WaitAll: Boolean = True;
   Milliseconds: Cardinal = INFINITE): Integer;
+
+procedure LocalVclCall(LocalProc: TLocalVclProc; Param: Integer = 0);
 
 implementation
 
@@ -279,6 +286,7 @@ type
     FMaxThreads: Integer;
     FThreads: TThreadList;
     FAsyncCalls: TThreadList;
+    FNumberOfProcessors: Cardinal;
 
     function AllocThread: TAsyncCallThread;
     function GetNextAsyncCall(Thread: TAsyncCallThread): TAsyncCall; // called from the threads
@@ -290,6 +298,7 @@ type
     function RemoveAsyncCall(Call: TAsyncCall): Boolean;
 
     property MaxThreads: Integer read FMaxThreads;
+    property NumberOfProcessors: Cardinal read FNumberOfProcessors;
   end;
 
   { TSyncCall is a fake IAsyncCall implementor. The async call was already
@@ -690,6 +699,127 @@ end;
 
 { ---------------------------------------------------------------------------- }
 
+type
+  TAsyncMTForLoopIterationRec = record
+    Index: Integer;
+    LoopContinue: Boolean;
+    BasePointer: Pointer;
+    SyncLock: TCriticalSection;
+    LocalProc: TLocalAsyncForLoopProc;
+  end;
+
+function AsyncMTForLoopIteration(var Context): Integer;
+asm
+  push eax // backup for the LoopContinue result
+
+  mov edx, [eax].TAsyncMTForLoopIterationRec.BasePointer
+  push edx
+
+  mov edx, [eax].TAsyncMTForLoopIterationRec.SyncLock
+  mov ecx, [eax].TAsyncMTForLoopIterationRec.LocalProc
+  mov eax, [eax].TAsyncMTForLoopIterationRec.Index
+  call ecx
+
+  pop ecx // take BasePointer from the stack
+
+  pop edx
+  mov [edx].TAsyncMTForLoopIterationRec.LoopContinue, al
+end;
+
+function InternAsyncMTForLoop(LocalProc: TLocalAsyncForLoopProc;
+  StartIndex, EndIndex: Integer; MaxThreads: Integer; BasePointer: Pointer): Boolean;
+var
+  Asyncs: array of IAsyncCall;
+  Contexts: array of TAsyncMTForLoopIterationRec;
+  SingleContext: TAsyncMTForLoopIterationRec;
+  Index, AsyncIndex, I: Integer;
+  SyncLock: TCriticalSection;
+begin
+  if StartIndex > EndIndex then
+  begin
+    Result := False;
+    Exit;
+  end;
+
+  Result := True;
+  SyncLock := TCriticalSection.Create;
+  try
+    if (StartIndex = EndIndex) or (MaxThreads = 1) then
+    begin
+      SingleContext.BasePointer := BasePointer;
+      SingleContext.SyncLock := SyncLock;
+      SingleContext.LocalProc := LocalProc;
+      Result := False;
+      for Index := StartIndex to EndIndex do
+      begin
+        SingleContext.Index := StartIndex;
+        AsyncMTForLoopIteration(SingleContext);
+        if not SingleContext.LoopContinue then
+          Exit;
+      end;
+      Result := True;
+    end
+    else
+    begin
+      if MaxThreads <= 0 then
+        MaxThreads := ThreadPool.NumberOfProcessors * 2;
+      SetLength(Asyncs, MaxThreads);
+      SetLength(Contexts, MaxThreads);
+      for I := 0 to MaxThreads - 1 do
+      begin
+        Contexts[I].BasePointer := BasePointer;
+        Contexts[I].SyncLock := SyncLock;
+        Contexts[I].LocalProc := LocalProc;
+      end;
+
+      AllocConsole;
+      Index := StartIndex;
+      repeat
+        for I := 0 to MaxThreads - 1 do
+        begin
+          if Asyncs[I] = nil then
+          begin
+            Contexts[I].Index := Index;
+            WriteLn(Index);
+            Asyncs[I] := AsyncCallEx(AsyncMTForLoopIteration, Contexts[I]);
+            if Index < EndIndex then
+              Inc(Index)
+            else
+              Break;
+          end;
+        end;
+        if Index = EndIndex then
+          Break;
+
+        AsyncIndex := AsyncMultiSync(Asyncs, False, 15000);
+        if not Contexts[AsyncIndex].LoopContinue then
+        begin
+          Result := False;
+          Break;
+        end;
+
+        Asyncs[AsyncIndex] := nil;
+      until Index > EndIndex;
+      { Wait for all remaining threads to finish. } 
+      AsyncMultiSync(Asyncs, True);
+    end;
+  finally
+    SyncLock.Free;
+  end;
+end;
+
+function AsyncMTForLoop(LocalProc: TLocalAsyncForLoopProc;
+  StartIndex, EndIndex: Integer; MaxThreads: Integer): Boolean;
+asm
+  pop ebp // remove stackframe
+  push [esp+4]
+  push ebp
+  call InternAsyncMTForLoop
+  push ebp
+end;
+
+{ ---------------------------------------------------------------------------- }
+
 function AsyncCallEx(Proc: TAsyncCallArgRecordProc; var Arg{: TRecordType}): IAsyncCall;
 begin
   { Execute the function synchron when no thread pool exists }
@@ -741,6 +871,66 @@ end;
 
 { ---------------------------------------------------------------------------- }
 
+function WaitForSingleObjectMainThread(AHandle: THandle; Timeout: Cardinal): Cardinal;
+var
+  Handles: array[0..1] of THandle;
+begin
+  Handles[0] := AHandle;
+  Handles[1] := Classes.SyncEvent;
+  repeat
+    Result := WaitForMultipleObjects(2, @Handles[0], False, Timeout);
+    if Result = WAIT_OBJECT_0 + 1 then
+      CheckSynchronize(0);
+  until Result <> WAIT_OBJECT_0 + 1;
+end;
+
+function WaitForMultipleObjectsMainThread(Count: Cardinal;
+  const AHandles: array of THandle; WaitAll: Boolean; Timeout: Cardinal): Cardinal;
+var
+  Handles: array of THandle;
+  Index: Cardinal;
+  FirstFinished: Cardinal;
+begin
+  SetLength(Handles, Count + 1);
+  Move(AHandles[0], Handles[0], Count * SizeOf(THandle));
+  Handles[Count] := Classes.SyncEvent;
+  if not WaitAll then
+  begin
+    repeat
+      Result := WaitForMultipleObjects(Count + 1, @Handles[0], WaitAll, Timeout);
+      if Result = WAIT_OBJECT_0 + Count then
+        CheckSynchronize(0);
+    until Result <> WAIT_OBJECT_0 + Count;
+  end
+  else
+  begin
+    FirstFinished := WAIT_TIMEOUT;
+    repeat
+      Result := WaitForMultipleObjects(Count + 1, @Handles[0], False, Timeout);
+      if Result = WAIT_OBJECT_0 + Count then
+        CheckSynchronize(0)
+      else
+      if {(Result >= WAIT_OBJECT_0) and} (Result <= WAIT_OBJECT_0 + Count) then
+      begin
+        if FirstFinished = WAIT_TIMEOUT then
+          FirstFinished := Result;
+        Dec(Count);
+        if Count > 0 then
+        begin
+          Index := Result - WAIT_OBJECT_0;
+          Move(Handles[Index + 1], Handles[Index], ((Count + 1) - Index) * SizeOf(THandle));
+        end;
+      end
+      else
+        Break;
+    until Count = 0;
+    if Count = 0 then
+      Result := FirstFinished;
+  end;
+end;
+
+{ ---------------------------------------------------------------------------- }
+
 function AsyncMultiSync(const List: array of IAsyncCall; WaitAll: Boolean;
   Milliseconds: Cardinal): Integer;
 
@@ -760,7 +950,7 @@ function AsyncMultiSync(const List: array of IAsyncCall; WaitAll: Boolean;
     SetLength(Mapping, Length(List));
     for I := 0 to High(List) do
     begin
-      if Supports(List[I], IAsyncCallEx, EventIntf) then
+      if (List[I] <> nil) and Supports(List[I], IAsyncCallEx, EventIntf) then
       begin
         Events[Count] := EventIntf.GetEvent;
         if Events[Count] <> 0 then
@@ -774,7 +964,10 @@ function AsyncMultiSync(const List: array of IAsyncCall; WaitAll: Boolean;
     { Wait for the async calls }
     if Count > 0 then
     begin
-      SignalState := WaitForMultipleObjects(Count, @Events[0], WaitAll, Milliseconds);
+      if GetCurrentThreadId = MainThreadID then
+        SignalState := WaitForMultipleObjectsMainThread(Count, Events, WaitAll, Milliseconds)
+      else
+        SignalState := WaitForMultipleObjects(Count, @Events[0], WaitAll, Milliseconds);
       if {(SignalState >= WAIT_OBJECT_0) and} (SignalState < WAIT_OBJECT_0 + Count) then
         Result := Mapping[SignalState - WAIT_OBJECT_0]
       else
@@ -792,7 +985,7 @@ function AsyncMultiSync(const List: array of IAsyncCall; WaitAll: Boolean;
     { We can execute some async calls in this thread. }
     for I := 0 to High(List) - 1 do
     begin
-      if Supports(List[I], IAsyncCallEx, Intf) then
+      if (List[I] <> nil) and Supports(List[I], IAsyncCallEx, Intf) then
       begin
         Intf.SyncInThisThreadIfPossible;
         Intf := nil;
@@ -800,7 +993,8 @@ function AsyncMultiSync(const List: array of IAsyncCall; WaitAll: Boolean;
     end;
     { Wait for the async calls that aren't finished yet. }
     for I := 0 to High(List) do
-      List[I].Sync;
+      if List[I] <> nil then
+        List[I].Sync;
     Result := 0;
   end;
 
@@ -808,7 +1002,7 @@ function AsyncMultiSync(const List: array of IAsyncCall; WaitAll: Boolean;
 begin
   if Length(List) > 0 then
   begin
-    if WaitAll and (Milliseconds = INFINITE) then
+    if WaitAll and (Milliseconds = INFINITE) and (GetCurrentThreadId <> MainThreadId) then
       Result := InternalWaitAllInfinite(List)
     else
       Result := InternalWait(List, WaitAll, Milliseconds);
@@ -844,13 +1038,13 @@ procedure TAsyncCallThread.Execute;
 var
   FAsyncCall: TAsyncCall;
   //MainWnd: THandle;
-  CoInitialied: Boolean;
+  CoInitialized: Boolean;
 begin
-  CoInitialied := CoInitialize(nil) = S_OK;
+  CoInitialized := CoInitialize(nil) = S_OK;
   try
     while not Terminated do
     begin
-      FAsyncCall := ThreadPool.GetNextAsyncCall(Self); { calls Suspend if nothing has to done. }
+      FAsyncCall := ThreadPool.GetNextAsyncCall(Self); { calls Suspend if nothing has to be done. }
       if FAsyncCall <> nil then
       begin
         try
@@ -873,7 +1067,7 @@ begin
       end;
     end;
   finally
-    if CoInitialied then
+    if CoInitialized then
       CoUninitialize;
   end;
 end;
@@ -914,6 +1108,7 @@ begin
   FAsyncCalls := TThreadList.Create;
 
   GetSystemInfo(SysInfo);
+  FNumberOfProcessors := SysInfo.dwNumberOfProcessors;
   FMaxThreads := SysInfo.dwNumberOfProcessors * 4 - 2 {main thread};
 end;
 
@@ -1094,8 +1289,16 @@ var
 begin
   if not Finished then
     if not SyncInThisThreadIfPossible then
+    begin
+      if GetCurrentThreadId = MainThreadID then
+      begin
+        if WaitForSingleObjectMainThread(FEvent, INFINITE) <> WAIT_OBJECT_0 then
+          NotFinishedError('Sync');
+      end
+      else
       if WaitForSingleObject(FEvent, INFINITE) <> WAIT_OBJECT_0 then
         NotFinishedError('Sync');
+    end;
   Result := FReturnValue;
 
   if FFatalException <> nil then
@@ -1103,7 +1306,7 @@ begin
     E := FFatalException;
     FFatalException := nil;
     raise E at FFatalErrorAddr;
-end;
+  end;
 end;
 
 function TAsyncCall.SyncInThisThreadIfPossible: Boolean;
@@ -1532,6 +1735,50 @@ asm
   push edx
   call ecx
   pop ecx
+end;
+
+{ ---------------------------------------------------------------------------- }
+
+type
+  PLocalVclCallRec = ^TLocalVclCallRec;
+  TLocalVclCallRec = record
+    BasePointer: Pointer;
+    Proc: TLocalVclProc;
+    Param: Integer;
+  end;
+
+procedure LocalVclCallProc(Data: PLocalVclCallRec);
+asm
+  mov edx, [eax].TLocalVclCallRec.BasePointer
+  mov ecx, [eax].TLocalVclCallRec.Proc
+  mov eax, [eax].TLocalVclCallRec.Param
+  push edx // parent EBP
+  call ecx
+  pop ecx // clean up
+end;
+
+procedure InternLocalVclCall(LocalProc: TLocalVclProc; Param: Integer; BasePointer: Pointer);
+var
+  M: TMethod;
+  Data: TLocalVclCallRec;
+begin
+  Data.BasePointer := BasePointer;
+  Data.Proc := LocalProc;
+  Data.Param := Param;
+  if GetCurrentThreadId = MainThreadID then
+    LocalVclCallProc(@Data)
+  else
+  begin
+    M.Code := @LocalVclCallProc;
+    M.Data := @Data;
+    TThread.Synchronize(nil, TThreadMethod(M));
+  end;
+end;
+
+procedure LocalVclCall(LocalProc: TLocalVclProc; Param: Integer);
+asm
+  mov ecx, ebp
+  jmp InternLocalVclCall
 end;
 
 initialization
