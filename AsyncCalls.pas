@@ -13,7 +13,7 @@
 { The Original Code is AsyncCalls.pas.                                                             }
 {                                                                                                  }
 { The Initial Developer of the Original Code is Andreas Hausladen.                                 }
-{ Portions created by Andreas Hausladen are Copyright (C) 2006-2007 Andreas Hausladen.             }
+{ Portions created by Andreas Hausladen are Copyright (C) 2006-2008 Andreas Hausladen.             }
 { All Rights Reserved.                                                                             }
 {                                                                                                  }
 { Contributor(s):                                                                                  }
@@ -23,17 +23,21 @@
 
 unit AsyncCalls;
 
-{$IFDEF CONDITIONALEXPRESSIONS}
-  {$WARN SYMBOL_PLATFORM OFF}
-  {$WARN UNIT_PLATFORM OFF}
-  {$IF CompilerVersion >= 15.0}
-    {$WARN UNSAFE_TYPE OFF}
-    {$WARN UNSAFE_CODE OFF}
-    {$WARN UNSAFE_CAST OFF}
-  {$IFEND}
-{$ELSE}
-  {$DEFINE DELPHI5_LOWER}
-{$ENDIF CONDITIONALEXPRESSIONS}
+{$IFNDEF CONDITIONALEXPRESSIONS}
+  'Your compiler version isn''t supported'
+{$ENDIF}
+
+{$WARN SYMBOL_PLATFORM OFF}
+{$WARN UNIT_PLATFORM OFF}
+{$IF CompilerVersion >= 15.0}
+  {$WARN UNSAFE_TYPE OFF}
+  {$WARN UNSAFE_CODE OFF}
+  {$WARN UNSAFE_CAST OFF}
+{$IFEND}
+
+{$IF CompilerVersion >= 18.0}
+  {$DEFINE SUPPORTS_INLINE}
+{$IFEND}
 
 {$DEFINE DEBUGASYNCCALLS}
 {$IFDEF DEBUGASYNCCALLS}
@@ -43,17 +47,21 @@ unit AsyncCalls;
 interface
 
 uses
-  Windows, SysUtils, Classes, Contnrs, ActiveX, SyncObjs;
+  Windows, Messages, SysUtils, Classes, Contnrs, ActiveX, SyncObjs;
 
 type
-  {$IFDEF DELPHI5_LOWER}
-  IInterface = IUnknown;
-  {$ENDIF DELPHI5_LOWER}
+  {$IF not declared(INT_PTR)}
+  INT_PTR = Integer;
+  {$IFEND}
+
+  TAsyncIdleMsgMethod = procedure of object;
+
   TCdeclFunc = Pointer; // function(Arg1: Type1; Arg2: Type2; ...); cdecl;
   TCdeclMethod = TMethod; // function(Arg1: Type1; Arg2: Type2; ...) of object; cdecl;
   TLocalAsyncProc = function: Integer;
-  TLocalVclProc = procedure(Param: Integer);
-  TLocalAsyncForLoopProc = function(Index: Integer; SyncLock: TCriticalSection): Boolean;
+  TLocalVclProc = function(Param: INT_PTR): Integer;
+  TLocalAsyncProcEx = function(Param: INT_PTR): Integer;
+  //TLocalAsyncForLoopProc = function(Index: Integer; SyncLock: TCriticalSection): Boolean;
 
   TAsyncCallArgObjectProc = function(Arg: TObject): Integer;
   TAsyncCallArgIntegerProc = function(Arg: Integer): Integer;
@@ -87,15 +95,19 @@ type
 
   IAsyncCall = interface
     { Sync() waits until the asynchronous call has finished and returns the
-      result value of the called function. }
+      result value of the called function if that exists. }
     function Sync: Integer;
 
-    { Finished() returns True when the asynchronous call has finished. }
+    { Finished() returns True if the asynchronous call has finished. }
     function Finished: Boolean;
 
     { ReturnValue() returns the result of the asynchronous call. It raises an
       exception if called before the function has finished. }
     function ReturnValue: Integer;
+
+    { ForceDifferentThread() tells AsyncCall that the assigned function must
+      not be executed in the current thread. }
+    procedure ForceDifferentThread;
   end;
 
 
@@ -151,6 +163,7 @@ function AsyncCall(Method: TAsyncCallArgInterfaceEvent; const Arg: IInterface): 
 function AsyncCall(Method: TAsyncCallArgExtendedEvent; const Arg: Extended): IAsyncCall; overload;
 function AsyncCallVar(Method: TAsyncCallArgVariantEvent; const Arg: Variant): IAsyncCall; overload;
 
+procedure AsyncExec(Method: TNotifyEvent; Arg: TObject; IdleMsgMethod: TAsyncIdleMsgMethod);
 
 { LocalAsyncCall() executes the given local function/procedure in a separate thread.
   The result value of the asynchronous function is returned by IAsyncCall.Sync() and
@@ -176,9 +189,65 @@ Example:
   end;
 }
 function LocalAsyncCall(LocalProc: TLocalAsyncProc): IAsyncCall;
+function LocalAsyncCallEx(LocalProc: TLocalAsyncProcEx; Param: INT_PTR): IAsyncCall;
+procedure LocalAsyncExec(Proc: TLocalAsyncProc; IdleMsgMethod: TAsyncIdleMsgMethod);
 
-function AsyncMTForLoop(LocalProc: TLocalAsyncForLoopProc;
-  StartIndex, EndIndex: Integer; MaxThreads: Integer = 0): Boolean; // false if LoopBreak
+
+
+
+{ LocalVclCall() executes the given local function/procedure in the main thread. It
+  uses the TThread.Synchronize function which cause blocking of the current thread.
+  LocalAsyncVclCall() execute the given local function/procedure in the main thread.
+  It does not wait for the main thread to execute the function unless the current
+  thread is the main thread. In that case it executes and waits for the specified
+  function in the current thread like LocalVclCall().
+
+  The result value of the asynchronous function is returned by IAsyncCall.Sync() and
+  IAsyncCall.ReturnValue().
+
+Example:
+  procedure TForm1.MainProc;
+
+    procedure DoSomething;
+
+      procedure UpdateProgressBar(Percentage: Integer);
+      begin
+        ProgressBar.Position := Percentage;
+        Sleep(20); // This delay does not affect the time for the 0..100 loop
+                   // because UpdateProgressBar is non-blocking.
+      end;
+
+      procedure Finished;
+      begin
+        ShowMessage('Finished');
+      end;
+
+    var
+      I: Integer;
+    begin
+      for I := 0 to 100 do
+      begin
+        // Do some time consuming stuff
+        Sleep(30);
+        LocalAsyncVclCall(@UpdateProgressBar, I); // non-blocking
+      end;
+      LocalVclCall(@Finished); // blocking
+    end;
+
+  var
+    a: IAsyncCall;
+  begin
+    a := LocalAsyncCall(@DoSomething);
+    a.ForceDifferentThread; // Do not execute in the main thread because this will
+                            // change LocalAyncVclCall into a blocking LocalVclCall
+    // do something
+    //a.Sync; The Compiler will call this for us in the Interface._Release method
+  end;
+}
+
+procedure LocalVclCall(LocalProc: TLocalVclProc; Param: INT_PTR = 0);
+function LocalAsyncVclCall(LocalProc: TLocalVclProc; Param: INT_PTR = 0): IAsyncCall;
+
 
 
 { AsyncCallEx() executes the given function/procedure in a separate thread. The
@@ -239,6 +308,7 @@ function AsyncCall(Proc: TCdeclMethod; const Args: array of const): IAsyncCall; 
 
 
 { AsyncMultiSync() waits for the async calls to finish.
+
     WaitAll = True  : The function returns when all listed async calls have
                       finished. If Milliseconds is INFINITE the async calls
                       meight be executed in the current thread.
@@ -251,13 +321,19 @@ function AsyncCall(Proc: TCdeclMethod; const Args: array of const): IAsyncCall; 
     Milliseconds    : Specifies the number of milliseconds to wait until a
                       timeout happens. The value INFINITE lets the function wait
                       until all async calls have finished.
+
+    dwWakeMask      : see Windows.MsgWaitForMultipleObjects()
 }
 function AsyncMultiSync(const List: array of IAsyncCall; WaitAll: Boolean = True;
   Milliseconds: Cardinal = INFINITE): Integer;
 
-procedure LocalVclCall(LocalProc: TLocalVclProc; Param: Integer = 0);
+function MsgAsyncMultiSync(const List: array of IAsyncCall; WaitAll: Boolean;
+  Milliseconds: Cardinal; dwWakeMask: DWORD): Integer;
 
 implementation
+
+{TODO: function AsyncMTForLoop(LocalProc: TLocalAsyncForLoopProc;
+  StartIndex, EndIndex: Integer; MaxThreads: Integer = 0): Boolean; // false if LoopBreak}
 
 resourcestring
   RsAsyncCallNotFinished = 'The asynchronous call is not finished yet';
@@ -288,17 +364,25 @@ type
     FAsyncCalls: TThreadList;
     FNumberOfProcessors: Cardinal;
 
+    FMainThreadSyncEvent: THandle;
+    FMainThreadVclHandle: HWND;
+    procedure MainThreadWndProc(var Msg: TMessage);
+    procedure ProcessMainThreadSync;
+
     function AllocThread: TAsyncCallThread;
     function GetNextAsyncCall(Thread: TAsyncCallThread): TAsyncCall; // called from the threads
   public
     constructor Create;
     destructor Destroy; override;
 
+    procedure SendVclSync(Call: TAsyncCall);
+
     procedure AddAsyncCall(Call: TAsyncCall);
     function RemoveAsyncCall(Call: TAsyncCall): Boolean;
 
     property MaxThreads: Integer read FMaxThreads;
     property NumberOfProcessors: Cardinal read FNumberOfProcessors;
+    property MainThreadSyncEvent: THandle read FMainThreadSyncEvent;
   end;
 
   { TSyncCall is a fake IAsyncCall implementor. The async call was already
@@ -311,6 +395,7 @@ type
     function Sync: Integer;
     function Finished: Boolean;
     function ReturnValue: Integer;
+    procedure ForceDifferentThread;
   end;
 
   { TAsyncCall is the base class for all parameter based async call types }
@@ -321,7 +406,9 @@ type
     FFinished: Boolean;
     FFatalException: Exception;
     FFatalErrorAddr: Pointer;
+    FForceDifferentThread: Boolean;
     procedure InternExecuteAsyncCall;
+    procedure Quit(AReturnValue: Integer);
   protected
     { Decendants must implement this method. It is called  when the async call
       should be executed. }
@@ -337,6 +424,7 @@ type
     function Sync: Integer;
     function Finished: Boolean;
     function ReturnValue: Integer;
+    procedure ForceDifferentThread;
   end;
 
 { ---------------------------------------------------------------------------- }
@@ -411,6 +499,28 @@ type
     function ExecuteAsyncCall: Integer; override;
   public
     constructor Create(AProc: TLocalAsyncProc; ABasePointer: Pointer);
+  end;
+
+  TAsyncCallLocalProcEx = class(TAsyncCall)
+  private
+    FProc: TLocalAsyncProc;
+    FBasePointer: Pointer;
+    FParam: INT_PTR;
+  protected
+    function ExecuteAsyncCall: Integer; override;
+  public
+    constructor Create(AProc: TLocalAsyncProc; AParam: INT_PTR; ABasePointer: Pointer);
+  end;
+
+  TAsyncVclCallLocalProc = class(TAsyncCall)
+  private
+    FProc: TLocalVclProc;
+    FBasePointer: Pointer;
+    FParam: INT_PTR;
+  protected
+    function ExecuteAsyncCall: Integer; override;
+  public
+    constructor Create(AProc: TLocalVclProc; AParam: INT_PTR; ABasePointer: Pointer);
   end;
 
 { ---------------------------------------------------------------------------- }
@@ -685,6 +795,22 @@ begin
 end;
 
 { ---------------------------------------------------------------------------- }
+
+procedure AsyncExec(Method: TNotifyEvent; Arg: TObject; IdleMsgMethod: TAsyncIdleMsgMethod);
+var
+  Handle: IAsyncCall;
+begin
+  Handle := AsyncCall(Method, Arg);
+  if Assigned(IdleMsgMethod) then
+  begin
+    Handle.ForceDifferentThread;
+    IdleMsgMethod;
+    while MsgAsyncMultiSync([Handle], False, INFINITE, QS_ALLINPUT) = 1 do
+      IdleMsgMethod;
+  end;
+end;
+
+{ ---------------------------------------------------------------------------- }
 function InternLocalAsyncCall(LocalProc: TLocalAsyncProc; BasePointer: Pointer): IAsyncCall;
 begin
   Result := TAsyncCallLocalProc.Create(LocalProc, BasePointer).ExecuteAsync;
@@ -697,9 +823,44 @@ asm
   jmp InternLocalAsyncCall
 end;
 
+function InternLocalAsyncCallEx(LocalProc: TLocalAsyncProc; Param: INT_PTR; BasePointer: Pointer): IAsyncCall;
+begin
+  Result := TAsyncCallLocalProcEx.Create(LocalProc, Param, BasePointer).ExecuteAsync;
+end;
+
+function LocalAsyncCallEx(LocalProc: TLocalAsyncProcEx; Param: INT_PTR): IAsyncCall;
+asm
+  push ecx // interface return address
+  mov ecx, ebp
+  call InternLocalAsyncCallEx
+end;
+
+procedure InternLocalAsyncExec(LocalProc: TLocalAsyncProc; IdleMsgMethod: TAsyncIdleMsgMethod; BasePointer: Pointer);
+var
+  Handle: IAsyncCall;
+begin
+  Handle := TAsyncCallLocalProc.Create(LocalProc, BasePointer).ExecuteAsync;
+  if Assigned(IdleMsgMethod) then
+  begin
+    Handle.ForceDifferentThread;
+    IdleMsgMethod;
+    while MsgAsyncMultiSync([Handle], False, INFINITE, QS_ALLINPUT) = 1 do
+      IdleMsgMethod;
+  end;
+end;
+
+{$STACKFRAMES ON}
+procedure LocalAsyncExec(Proc: TLocalAsyncProc; IdleMsgMethod: TAsyncIdleMsgMethod);
+asm // TMethod causes the compiler to generate a stackframe
+  pop ebp // remove stackframe
+  mov edx, ebp
+  jmp InternLocalAsyncExec
+end;
+{$STACKFRAMES OFF}
+
 { ---------------------------------------------------------------------------- }
 
-type
+{type
   TAsyncMTForLoopIterationRec = record
     Index: Integer;
     LoopContinue: Boolean;
@@ -800,7 +961,7 @@ begin
 
         Asyncs[AsyncIndex] := nil;
       until Index > EndIndex;
-      { Wait for all remaining threads to finish. } 
+      // Wait for all remaining threads to finish.
       AsyncMultiSync(Asyncs, True);
     end;
   finally
@@ -816,7 +977,7 @@ asm
   push ebp
   call InternAsyncMTForLoop
   push ebp
-end;
+end;}
 
 { ---------------------------------------------------------------------------- }
 
@@ -871,44 +1032,90 @@ end;
 
 { ---------------------------------------------------------------------------- }
 
-function WaitForSingleObjectMainThread(AHandle: THandle; Timeout: Cardinal): Cardinal;
+function WaitForSingleObjectMainThread(AHandle: THandle; Timeout: Cardinal;
+  MsgWait: Boolean = False; dwWakeMask: DWORD = 0): Cardinal;
 var
-  Handles: array[0..1] of THandle;
+  Handles: array[0..2] of THandle;
 begin
   Handles[0] := AHandle;
   Handles[1] := Classes.SyncEvent;
+  Handles[2] := ThreadPool.MainThreadSyncEvent;
   repeat
-    Result := WaitForMultipleObjects(2, @Handles[0], False, Timeout);
+    if MsgWait then
+    begin
+      Result := MsgWaitForMultipleObjects(3, Handles[0], False, Timeout, dwWakeMask);
+      if Result = WAIT_OBJECT_0 + 3 then
+      begin
+        ThreadPool.ProcessMainThreadSync; // also uses the message queue
+        Result := WAIT_OBJECT_0 + 1; // caller doesn't know about the 2 synchronization events
+        Exit;
+      end;
+    end
+    else
+      Result := WaitForMultipleObjects(3, @Handles[0], False, Timeout);
     if Result = WAIT_OBJECT_0 + 1 then
-      CheckSynchronize(0);
-  until Result <> WAIT_OBJECT_0 + 1;
+      CheckSynchronize(0)
+    else if Result = WAIT_OBJECT_0 + 2 then
+      ThreadPool.ProcessMainThreadSync;
+  until (Result <> WAIT_OBJECT_0 + 1) and (Result <> WAIT_OBJECT_0 + 2);
 end;
 
 function WaitForMultipleObjectsMainThread(Count: Cardinal;
-  const AHandles: array of THandle; WaitAll: Boolean; Timeout: Cardinal): Cardinal;
+  const AHandles: array of THandle; WaitAll: Boolean; Timeout: Cardinal;
+  MsgWait: Boolean; dwWakeMask: DWORD): Cardinal;
 var
   Handles: array of THandle;
   Index: Cardinal;
   FirstFinished: Cardinal;
 begin
-  SetLength(Handles, Count + 1);
+  { Wait for the specified events, for the VCL SyncEvent and for the MainThreadSync event }
+  SetLength(Handles, Count + 2);
   Move(AHandles[0], Handles[0], Count * SizeOf(THandle));
   Handles[Count] := Classes.SyncEvent;
+  Handles[Count + 1] := ThreadPool.MainThreadSyncEvent;
   if not WaitAll then
   begin
     repeat
-      Result := WaitForMultipleObjects(Count + 1, @Handles[0], WaitAll, Timeout);
+      if MsgWait then
+      begin
+        Result := MsgWaitForMultipleObjects(Count + 2, Handles[0], WaitAll, Timeout, dwWakeMask);
+        if Result = WAIT_OBJECT_0 + Count + 2 then
+        begin
+          ThreadPool.ProcessMainThreadSync; // also uses the message queue
+          Result := WAIT_OBJECT_0 + Count; // caller doesn't know about the 2 synchronization events
+          Exit;
+        end;
+      end
+      else
+        Result := WaitForMultipleObjects(Count + 2, @Handles[0], WaitAll, Timeout);
+
       if Result = WAIT_OBJECT_0 + Count then
-        CheckSynchronize(0);
-    until Result <> WAIT_OBJECT_0 + Count;
+        CheckSynchronize(0)
+      else if Result = WAIT_OBJECT_0 + Count + 1 then
+        ThreadPool.ProcessMainThreadSync;
+    until (Result <> WAIT_OBJECT_0 + Count) and (Result <> WAIT_OBJECT_0 + Count + 1);
   end
   else
   begin
     FirstFinished := WAIT_TIMEOUT;
     repeat
-      Result := WaitForMultipleObjects(Count + 1, @Handles[0], False, Timeout);
+      if MsgWait then
+      begin
+        Result := MsgWaitForMultipleObjects(Count + 2, Handles[0], False, Timeout, dwWakeMask);
+        if Result = WAIT_OBJECT_0 + Count + 2 then
+        begin
+          ThreadPool.ProcessMainThreadSync; // also uses the message queue
+          Result := WAIT_OBJECT_0 + Count; // caller doesn't know about the 2 synchronization events
+          Exit;
+        end;
+      end
+      else
+        Result := WaitForMultipleObjects(Count + 2, @Handles[0], False, Timeout);
+
       if Result = WAIT_OBJECT_0 + Count then
         CheckSynchronize(0)
+      else if Result = WAIT_OBJECT_0 + Count + 1 then
+        ThreadPool.ProcessMainThreadSync
       else
       if {(Result >= WAIT_OBJECT_0) and} (Result <= WAIT_OBJECT_0 + Count) then
       begin
@@ -931,11 +1138,11 @@ end;
 
 { ---------------------------------------------------------------------------- }
 
-function AsyncMultiSync(const List: array of IAsyncCall; WaitAll: Boolean;
-  Milliseconds: Cardinal): Integer;
+function InternalAsyncMultiSync(const List: array of IAsyncCall; WaitAll: Boolean;
+  Milliseconds: Cardinal; MsgWait: Boolean; dwWakeMask: DWORD): Integer;
 
   function InternalWait(const List: array of IAsyncCall; WaitAll: Boolean;
-    Milliseconds: Cardinal): Integer;
+    Milliseconds: Cardinal; MsgWait: Boolean; dwWakeMask: DWORD): Integer;
   var
     Events: array of THandle;
     Mapping: array of Integer;
@@ -965,9 +1172,28 @@ function AsyncMultiSync(const List: array of IAsyncCall; WaitAll: Boolean;
     if Count > 0 then
     begin
       if GetCurrentThreadId = MainThreadID then
-        SignalState := WaitForMultipleObjectsMainThread(Count, Events, WaitAll, Milliseconds)
+      begin
+        SignalState := WaitForMultipleObjectsMainThread(Count, Events, WaitAll, Milliseconds, MsgWait, dwWakeMask);
+        if SignalState = Count then // "message" was signaled
+        begin
+          Result := SignalState;
+          Exit;
+        end;
+      end
       else
-        SignalState := WaitForMultipleObjects(Count, @Events[0], WaitAll, Milliseconds);
+      begin
+        if MsgWait then
+        begin
+          SignalState := MsgWaitForMultipleObjects(Count, Events[0], WaitAll, Milliseconds, dwWakeMask);
+          if SignalState = Count then // "message" was signaled
+          begin
+            Result := SignalState;
+            Exit;
+          end;
+        end
+        else
+          SignalState := WaitForMultipleObjects(Count, @Events[0], WaitAll, Milliseconds);
+      end;
       if {(SignalState >= WAIT_OBJECT_0) and} (SignalState < WAIT_OBJECT_0 + Count) then
         Result := Mapping[SignalState - WAIT_OBJECT_0]
       else
@@ -980,17 +1206,7 @@ function AsyncMultiSync(const List: array of IAsyncCall; WaitAll: Boolean;
   function InternalWaitAllInfinite(const List: array of IAsyncCall): Integer;
   var
     I: Integer;
-    Intf: IAsyncCallEx;
   begin
-    { We can execute some async calls in this thread. }
-    for I := 0 to High(List) - 1 do
-    begin
-      if (List[I] <> nil) and Supports(List[I], IAsyncCallEx, Intf) then
-      begin
-        Intf.SyncInThisThreadIfPossible;
-        Intf := nil;
-      end;
-    end;
     { Wait for the async calls that aren't finished yet. }
     for I := 0 to High(List) do
       if List[I] <> nil then
@@ -998,17 +1214,28 @@ function AsyncMultiSync(const List: array of IAsyncCall; WaitAll: Boolean;
     Result := 0;
   end;
 
-
 begin
   if Length(List) > 0 then
   begin
-    if WaitAll and (Milliseconds = INFINITE) and (GetCurrentThreadId <> MainThreadId) then
+    if WaitAll and (Milliseconds = INFINITE) and not MsgWait and (GetCurrentThreadId <> MainThreadId) then
       Result := InternalWaitAllInfinite(List)
     else
-      Result := InternalWait(List, WaitAll, Milliseconds);
+      Result := InternalWait(List, WaitAll, Milliseconds, MsgWait, dwWakeMask);
   end
   else
     Result := 0;
+end;
+
+function AsyncMultiSync(const List: array of IAsyncCall; WaitAll: Boolean;
+  Milliseconds: Cardinal): Integer;
+begin
+  Result := InternalAsyncMultiSync(List, WaitAll, Milliseconds, False, 0);
+end;
+
+function MsgAsyncMultiSync(const List: array of IAsyncCall; WaitAll: Boolean;
+  Milliseconds: Cardinal; dwWakeMask: DWORD): Integer;
+begin
+  Result := InternalAsyncMultiSync(List, WaitAll, Milliseconds, True, dwWakeMask);
 end;
 
 procedure NotFinishedError(const FunctionName: string);
@@ -1106,6 +1333,8 @@ begin
   inherited Create;
   FThreads := TThreadList.Create;
   FAsyncCalls := TThreadList.Create;
+  FMainThreadVclHandle := AllocateHWnd(MainThreadWndProc);
+  FMainThreadSyncEvent := CreateEvent(nil, False, False, nil);
 
   GetSystemInfo(SysInfo);
   FNumberOfProcessors := SysInfo.dwNumberOfProcessors;
@@ -1128,6 +1357,9 @@ begin
     SetEvent(TAsyncCall(List[I]).FEvent);
   FAsyncCalls.UnlockList;
   FAsyncCalls.Free;
+
+  CloseHandle(FMainThreadSyncEvent);
+  DeallocateHWnd(FMainThreadVclHandle);
 
   inherited Destroy;
 end;
@@ -1201,6 +1433,38 @@ begin
   Result.Resume;
 end;
 
+const
+  WM_VCLSYNC = WM_USER + 12;
+
+procedure TThreadPool.SendVclSync(Call: TAsyncCall);
+begin
+  if not PostMessage(FMainThreadVclHandle, WM_VCLSYNC, 0, LPARAM(Call)) then
+    Call.Quit(0)
+  else
+    SetEvent(FMainThreadSyncEvent);
+end;
+
+procedure TThreadPool.MainThreadWndProc(var Msg: TMessage);
+begin
+  if Msg.Msg = WM_VCLSYNC then
+    TAsyncCall(Msg.LParam).InternExecuteAsyncCall;
+
+  with Msg do
+    Result := DefWindowProc(FMainThreadVclHandle, Msg, WParam, LParam);
+end;
+
+procedure TThreadPool.ProcessMainThreadSync;
+var
+  Msg: TMsg;
+begin
+  Assert( GetCurrentThreadId = MainThreadId ); 
+  while PeekMessage(Msg, FMainThreadVclHandle, 0, 0, PM_REMOVE) do
+  begin
+    TranslateMessage(Msg);
+    DispatchMessage(Msg);
+  end;
+end;
+
 { ---------------------------------------------------------------------------- }
 { TSyncCall }
 
@@ -1213,6 +1477,10 @@ end;
 function TSyncCall.Finished: Boolean;
 begin
   Result := True;
+end;
+
+procedure TSyncCall.ForceDifferentThread;
+begin
 end;
 
 function TSyncCall.ReturnValue: Integer;
@@ -1234,7 +1502,7 @@ begin
   FEvent := CreateEvent(nil, True, False, nil);
 end;
 
-destructor TAsyncCall.Destroy;
+destructor TAsyncCall.Destroy; 
 begin
   if FEvent <> 0 then
   begin
@@ -1242,6 +1510,7 @@ begin
       Sync;
     finally
       CloseHandle(FEvent);
+      FEvent := 0;
     end;
   end;
   inherited Destroy;
@@ -1252,19 +1521,33 @@ begin
   Result := (FEvent = 0) or FFinished or (WaitForSingleObject(FEvent, 0) = WAIT_OBJECT_0);
 end;
 
+procedure TAsyncCall.ForceDifferentThread;
+begin
+  FForceDifferentThread := True;
+end;
+
 function TAsyncCall.GetEvent: Cardinal;
 begin
   Result := FEvent;
 end;
 
 procedure TAsyncCall.InternExecuteAsyncCall;
+var
+  Value: Integer;
 begin
+  Value := 0;
   try
-    FReturnValue := ExecuteAsyncCall;
+    Value := ExecuteAsyncCall;
   finally
-    FFinished := True;
-    SetEvent(FEvent);
+    Quit(Value);
   end;
+end;
+
+procedure TAsyncCall.Quit(AReturnValue: Integer);
+begin
+  FReturnValue := AReturnValue;
+  FFinished := True;
+  SetEvent(FEvent);
 end;
 
 function TAsyncCall.ReturnValue: Integer;
@@ -1272,7 +1555,7 @@ var
   E: Exception;
 begin
   if not Finished then
-    NotFinishedError('ReturnValue');
+    NotFinishedError('IAsyncCall.ReturnValue');
   Result := FReturnValue;
 
   if FFatalException <> nil then
@@ -1288,17 +1571,19 @@ var
   E: Exception;
 begin
   if not Finished then
+  begin
     if not SyncInThisThreadIfPossible then
     begin
       if GetCurrentThreadId = MainThreadID then
       begin
         if WaitForSingleObjectMainThread(FEvent, INFINITE) <> WAIT_OBJECT_0 then
-          NotFinishedError('Sync');
+          NotFinishedError('IAsyncCall.Sync');
       end
       else
       if WaitForSingleObject(FEvent, INFINITE) <> WAIT_OBJECT_0 then
-        NotFinishedError('Sync');
+        NotFinishedError('IAsyncCall.Sync');
     end;
+  end;
   Result := FReturnValue;
 
   if FFatalException <> nil then
@@ -1313,15 +1598,17 @@ function TAsyncCall.SyncInThisThreadIfPossible: Boolean;
 begin
   if not Finished then
   begin
-    { If no thread was assigned to this async call, remove it form the waiting
-      queue and execute it in the current thread. }
-    if ThreadPool.RemoveAsyncCall(Self) then
+    Result := False;
+    if not FForceDifferentThread then
     begin
-      InternExecuteAsyncCall;
-      Result := True;
-    end
-    else
-      Result := False;
+      { If no thread was assigned to this async call, remove it form the waiting
+        queue and execute it in the current thread. }
+      if ThreadPool.RemoveAsyncCall(Self) then
+      begin
+        InternExecuteAsyncCall;
+        Result := True;
+      end;
+    end;
   end
   else
     Result := True;
@@ -1732,6 +2019,49 @@ function TAsyncCallLocalProc.ExecuteAsyncCall: Integer;
 asm
   mov edx, [eax].TAsyncCallLocalProc.FBasePointer
   mov ecx, [eax].TAsyncCallLocalProc.FProc
+  xor eax, eax // paramater
+  push edx
+  call ecx
+  pop ecx
+end;
+
+{ TAsyncCallLocalProcEx }
+
+constructor TAsyncCallLocalProcEx.Create(AProc: TLocalAsyncProc; AParam: INT_PTR; ABasePointer: Pointer);
+begin
+  inherited Create;
+  @FProc := @AProc;
+  FBasePointer := ABasePointer;
+  FParam := AParam;
+end;
+
+function TAsyncCallLocalProcEx.ExecuteAsyncCall: Integer;
+asm
+  mov edx, [eax].TAsyncCallLocalProcEx.FBasePointer
+  mov ecx, [eax].TAsyncCallLocalProcEx.FProc
+  mov eax, [eax].TAsyncCallLocalProcEx.FParam
+  push edx
+  call ecx
+  pop ecx
+end;
+
+{ ---------------------------------------------------------------------------- }
+
+{ TAsyncVclCallLocalProc }
+
+constructor TAsyncVclCallLocalProc.Create(AProc: TLocalVclProc; AParam: INT_PTR; ABasePointer: Pointer);
+begin
+  inherited Create;
+  @FProc := @AProc;
+  FBasePointer := ABasePointer;
+  FParam := AParam;
+end;
+
+function TAsyncVclCallLocalProc.ExecuteAsyncCall: Integer;
+asm
+  mov edx, [eax].TAsyncCallLocalProcEx.FBasePointer
+  mov ecx, [eax].TAsyncCallLocalProcEx.FProc
+  mov eax, [eax].TAsyncCallLocalProcEx.FParam
   push edx
   call ecx
   pop ecx
@@ -1744,20 +2074,20 @@ type
   TLocalVclCallRec = record
     BasePointer: Pointer;
     Proc: TLocalVclProc;
-    Param: Integer;
+    Param: INT_PTR;
   end;
 
-procedure LocalVclCallProc(Data: PLocalVclCallRec);
+function LocalVclCallProc(Data: PLocalVclCallRec): Integer;
 asm
   mov edx, [eax].TLocalVclCallRec.BasePointer
   mov ecx, [eax].TLocalVclCallRec.Proc
   mov eax, [eax].TLocalVclCallRec.Param
-  push edx // parent EBP
+  push edx
   call ecx
-  pop ecx // clean up
+  pop ecx 
 end;
 
-procedure InternLocalVclCall(LocalProc: TLocalVclProc; Param: Integer; BasePointer: Pointer);
+procedure InternLocalVclCall(LocalProc: TLocalVclProc; Param: INT_PTR; BasePointer: Pointer);
 var
   M: TMethod;
   Data: TLocalVclCallRec;
@@ -1775,10 +2105,37 @@ begin
   end;
 end;
 
-procedure LocalVclCall(LocalProc: TLocalVclProc; Param: Integer);
+procedure LocalVclCall(LocalProc: TLocalVclProc; Param: INT_PTR);
 asm
   mov ecx, ebp
   jmp InternLocalVclCall
+end;
+
+function InternLocalAsyncVclCall(LocalProc: TLocalVclProc; Param: INT_PTR; BasePointer: Pointer): IAsyncCall;
+var
+  Data: TLocalVclCallRec;
+  Call: TAsyncVclCallLocalProc;
+begin
+  if GetCurrentThreadId = MainThreadID then
+  begin
+    Data.BasePointer := BasePointer;
+    Data.Proc := LocalProc;
+    Data.Param := Param;
+    Result := TSyncCall.Create( LocalVclCallProc(@Data) );
+  end
+  else
+  begin
+    Call := TAsyncVclCallLocalProc.Create(LocalProc, Param, BasePointer);
+    ThreadPool.SendVclSync(Call);
+    Result := Call;
+  end;
+end;
+
+function LocalAsyncVclCall(LocalProc: TLocalVclProc; Param: INT_PTR = 0): IAsyncCall;
+asm
+  push ecx // interface return address
+  mov ecx, ebp
+  call InternLocalAsyncVclCall
 end;
 
 initialization
