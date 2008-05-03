@@ -23,8 +23,14 @@
 
 unit AsyncCalls;
 
+interface
+
 {$IFNDEF CONDITIONALEXPRESSIONS}
-  'Your compiler version isn''t supported'
+  'Your compiler version is not supported'
+{$ELSE}
+  {$IFDEF VER140}
+    {$MESSAGE ERROR 'Your compiler version is not supported'}
+  {$ENDIF}
 {$ENDIF}
 
 {$WARN SYMBOL_PLATFORM OFF}
@@ -39,12 +45,10 @@ unit AsyncCalls;
   {$DEFINE SUPPORTS_INLINE}
 {$IFEND}
 
-{$DEFINE DEBUGASYNCCALLS}
+{.$DEFINE DEBUGASYNCCALLS}
 {$IFDEF DEBUGASYNCCALLS}
-  {$D+}
+  {$D+,C+}
 {$ENDIF DEBUGASYNCCALLS}
-
-interface
 
 uses
   Windows, Messages, SysUtils, Classes, Contnrs, ActiveX, SyncObjs;
@@ -59,8 +63,8 @@ type
   TCdeclFunc = Pointer; // function(Arg1: Type1; Arg2: Type2; ...); cdecl;
   TCdeclMethod = TMethod; // function(Arg1: Type1; Arg2: Type2; ...) of object; cdecl;
   TLocalAsyncProc = function: Integer;
-  TLocalVclProc = function(Param: INT_PTR): Integer;
-  TLocalAsyncProcEx = function(Param: INT_PTR): Integer;
+  TLocalVclProc = function(Param: INT_PTR): INT_PTR;
+  TLocalAsyncProcEx = function(Param: INT_PTR): INT_PTR;
   //TLocalAsyncForLoopProc = function(Index: Integer; SyncLock: TCriticalSection): Boolean;
 
   TAsyncCallArgObjectProc = function(Arg: TObject): Integer;
@@ -123,7 +127,8 @@ function GetMaxAsyncCallThreads: Integer;
 
 { AsyncCall() executes the given function/procedure in a separate thread. The
   result value of the asynchronous function is returned by IAsyncCall.Sync() and
-  IAsyncCall.ReturnValue().
+  IAsyncCall.ReturnValue(). The AsyncExec() function calls the IdleMsgMethod while
+  the async. function/method is executed.
 
 Example:
   function FileAgeAsync(const Filename: string): Integer;
@@ -167,7 +172,8 @@ procedure AsyncExec(Method: TNotifyEvent; Arg: TObject; IdleMsgMethod: TAsyncIdl
 
 { LocalAsyncCall() executes the given local function/procedure in a separate thread.
   The result value of the asynchronous function is returned by IAsyncCall.Sync() and
-  IAsyncCall.ReturnValue().
+  IAsyncCall.ReturnValue(). The LocalAsyncExec() function calls the IdleMsgMethod while
+  the local procedure is executed.
 
 Example:
   procedure MainProc(const S: string);
@@ -186,12 +192,13 @@ Example:
     a := LocalAsyncCall(@DoSomething);
     // do something
     a.Sync;
+
+    LocalAsyncExec(@DoSomething, Application.ProcessMessages);
   end;
 }
 function LocalAsyncCall(LocalProc: TLocalAsyncProc): IAsyncCall;
 function LocalAsyncCallEx(LocalProc: TLocalAsyncProcEx; Param: INT_PTR): IAsyncCall;
 procedure LocalAsyncExec(Proc: TLocalAsyncProc; IdleMsgMethod: TAsyncIdleMsgMethod);
-
 
 
 
@@ -307,8 +314,10 @@ function AsyncCall(Proc: TCdeclFunc; const Args: array of const): IAsyncCall; ov
 function AsyncCall(Proc: TCdeclMethod; const Args: array of const): IAsyncCall; overload;
 
 
-{ AsyncMultiSync() waits for the async calls to finish.
+{ AsyncMultiSync() waits for the async calls and other handles to finish.
+  MsgAsyncMultiSync() waits for the async calls, other handles and the message queue.
 
+  Arguments:
     WaitAll = True  : The function returns when all listed async calls have
                       finished. If Milliseconds is INFINITE the async calls
                       meight be executed in the current thread.
@@ -323,17 +332,71 @@ function AsyncCall(Proc: TCdeclMethod; const Args: array of const): IAsyncCall; 
                       until all async calls have finished.
 
     dwWakeMask      : see Windows.MsgWaitForMultipleObjects()
+
+  Limitations:
+    Length(List)+Length(Handles) must not exceed 62.
+
+  Return value:
+    WAIT_TIMEOUT
+      The function timed out
+
+    WAIT_OBJECT_0+index
+      The first finished async call
+    WAIT_OBJECT_0+Length(List)+index
+      The first signaled handle
+    WAIT_OBJECT_0+Length(List)+Length(Handles)
+      A message was signaled
+
+    WAIT_ABANDONED_0+index
+      The abandoned async call
+    WAIT_ABANDONED_0+Length(List)+index
+      The abandoned handle
+
 }
 function AsyncMultiSync(const List: array of IAsyncCall; WaitAll: Boolean = True;
   Milliseconds: Cardinal = INFINITE): Integer;
-
+function AsyncMultiSyncEx(const List: array of IAsyncCall; const Handles: array of THandle;
+  WaitAll: Boolean = True; Milliseconds: Cardinal = INFINITE): Integer;
 function MsgAsyncMultiSync(const List: array of IAsyncCall; WaitAll: Boolean;
   Milliseconds: Cardinal; dwWakeMask: DWORD): Integer;
+function MsgAsyncMultiSyncEx(const List: array of IAsyncCall; const Handles: array of THandle;
+  WaitAll: Boolean; Milliseconds: Cardinal; dwWakeMask: DWORD): Integer;
+
+{
+   EnterMainThread/LeaveMainThread can be used to temporary switch to the
+   main thread. The code that should be synchonized (blocking) must be put
+   into a try/finally block and the LeaveMainThread() function must be called
+   from within the finally block. A missing try/finally will lead to an
+   access violation.
+   All local variables can be used. (EBP points to the thread's stack while
+   ESP points the the main thread's stack)
+   The integrated Debugger is not able to follow the program flow. You have
+   to use break points instead of "Step over/in".
+
+   Example:
+
+     procedure MyThreadProc;
+     var
+       S: string;
+     begin
+       Assert(GetCurrentThreadId <> MainThreadId);
+       S := 'Hallo, I''m executed in the main thread';
+
+       EnterMainThread;
+       try
+         Assert(GetCurrentThreadId = MainThreadId);
+         ShowMessage(S);
+       finally
+         LeaveMainThread;
+       end;
+
+       Assert(GetCurrentThreadId <> MainThreadId);
+     end;
+}
+procedure EnterMainThread;
+procedure LeaveMainThread;
 
 implementation
-
-{TODO: function AsyncMTForLoop(LocalProc: TLocalAsyncForLoopProc;
-  StartIndex, EndIndex: Integer; MaxThreads: Integer = 0): Boolean; // false if LoopBreak}
 
 resourcestring
   RsAsyncCallNotFinished = 'The asynchronous call is not finished yet';
@@ -860,130 +923,9 @@ end;
 
 { ---------------------------------------------------------------------------- }
 
-{type
-  TAsyncMTForLoopIterationRec = record
-    Index: Integer;
-    LoopContinue: Boolean;
-    BasePointer: Pointer;
-    SyncLock: TCriticalSection;
-    LocalProc: TLocalAsyncForLoopProc;
-  end;
-
-function AsyncMTForLoopIteration(var Context): Integer;
-asm
-  push eax // backup for the LoopContinue result
-
-  mov edx, [eax].TAsyncMTForLoopIterationRec.BasePointer
-  push edx
-
-  mov edx, [eax].TAsyncMTForLoopIterationRec.SyncLock
-  mov ecx, [eax].TAsyncMTForLoopIterationRec.LocalProc
-  mov eax, [eax].TAsyncMTForLoopIterationRec.Index
-  call ecx
-
-  pop ecx // take BasePointer from the stack
-
-  pop edx
-  mov [edx].TAsyncMTForLoopIterationRec.LoopContinue, al
-end;
-
-function InternAsyncMTForLoop(LocalProc: TLocalAsyncForLoopProc;
-  StartIndex, EndIndex: Integer; MaxThreads: Integer; BasePointer: Pointer): Boolean;
-var
-  Asyncs: array of IAsyncCall;
-  Contexts: array of TAsyncMTForLoopIterationRec;
-  SingleContext: TAsyncMTForLoopIterationRec;
-  Index, AsyncIndex, I: Integer;
-  SyncLock: TCriticalSection;
-begin
-  if StartIndex > EndIndex then
-  begin
-    Result := False;
-    Exit;
-  end;
-
-  Result := True;
-  SyncLock := TCriticalSection.Create;
-  try
-    if (StartIndex = EndIndex) or (MaxThreads = 1) then
-    begin
-      SingleContext.BasePointer := BasePointer;
-      SingleContext.SyncLock := SyncLock;
-      SingleContext.LocalProc := LocalProc;
-      Result := False;
-      for Index := StartIndex to EndIndex do
-      begin
-        SingleContext.Index := StartIndex;
-        AsyncMTForLoopIteration(SingleContext);
-        if not SingleContext.LoopContinue then
-          Exit;
-      end;
-      Result := True;
-    end
-    else
-    begin
-      if MaxThreads <= 0 then
-        MaxThreads := ThreadPool.NumberOfProcessors * 2;
-      SetLength(Asyncs, MaxThreads);
-      SetLength(Contexts, MaxThreads);
-      for I := 0 to MaxThreads - 1 do
-      begin
-        Contexts[I].BasePointer := BasePointer;
-        Contexts[I].SyncLock := SyncLock;
-        Contexts[I].LocalProc := LocalProc;
-      end;
-
-      AllocConsole;
-      Index := StartIndex;
-      repeat
-        for I := 0 to MaxThreads - 1 do
-        begin
-          if Asyncs[I] = nil then
-          begin
-            Contexts[I].Index := Index;
-            WriteLn(Index);
-            Asyncs[I] := AsyncCallEx(AsyncMTForLoopIteration, Contexts[I]);
-            if Index < EndIndex then
-              Inc(Index)
-            else
-              Break;
-          end;
-        end;
-        if Index = EndIndex then
-          Break;
-
-        AsyncIndex := AsyncMultiSync(Asyncs, False, 15000);
-        if not Contexts[AsyncIndex].LoopContinue then
-        begin
-          Result := False;
-          Break;
-        end;
-
-        Asyncs[AsyncIndex] := nil;
-      until Index > EndIndex;
-      // Wait for all remaining threads to finish.
-      AsyncMultiSync(Asyncs, True);
-    end;
-  finally
-    SyncLock.Free;
-  end;
-end;
-
-function AsyncMTForLoop(LocalProc: TLocalAsyncForLoopProc;
-  StartIndex, EndIndex: Integer; MaxThreads: Integer): Boolean;
-asm
-  pop ebp // remove stackframe
-  push [esp+4]
-  push ebp
-  call InternAsyncMTForLoop
-  push ebp
-end;}
-
-{ ---------------------------------------------------------------------------- }
-
 function AsyncCallEx(Proc: TAsyncCallArgRecordProc; var Arg{: TRecordType}): IAsyncCall;
 begin
-  { Execute the function synchron when no thread pool exists }
+  { Execute the function synchron if no thread pool exists }
   if ThreadPool.MaxThreads = 0 then
     Result := TSyncCall.Create(Proc(Arg))
   else
@@ -992,7 +934,7 @@ end;
 
 function AsyncCallEx(Method: TAsyncCallArgRecordMethod; var Arg{: TRecordType}): IAsyncCall;
 begin
-  { Execute the function synchron when no thread pool exists }
+  { Execute the function synchron if no thread pool exists }
   if ThreadPool.MaxThreads = 0 then
     Result := TSyncCall.Create(Method(Arg))
   else
@@ -1138,34 +1080,50 @@ end;
 
 { ---------------------------------------------------------------------------- }
 
-function InternalAsyncMultiSync(const List: array of IAsyncCall; WaitAll: Boolean;
-  Milliseconds: Cardinal; MsgWait: Boolean; dwWakeMask: DWORD): Integer;
+function InternalAsyncMultiSync(const List: array of IAsyncCall; const Handles: array of THandle;
+  WaitAll: Boolean; Milliseconds: Cardinal; MsgWait: Boolean; dwWakeMask: DWORD): Integer;
 
-  function InternalWait(const List: array of IAsyncCall; WaitAll: Boolean;
-    Milliseconds: Cardinal; MsgWait: Boolean; dwWakeMask: DWORD): Integer;
+  function InternalWait(const List: array of IAsyncCall; const Handles: array of THandle;
+    WaitAll: Boolean; Milliseconds: Cardinal; MsgWait: Boolean; dwWakeMask: DWORD): Integer;
   var
-    Events: array of THandle;
+    WaitHandles: array of THandle;
     Mapping: array of Integer;
     I: Integer;
     Count: Cardinal;
     EventIntf: IAsyncCallEx;
     SignalState: Cardinal;
   begin
-    { Get the TAsyncCall events and ignore TSyncCall objects }
+    SetLength(WaitHandles, Length(List) + Length(Handles));
+    SetLength(Mapping, Length(WaitHandles));
     Count := 0;
-    SetLength(Events, Length(List));
-    SetLength(Mapping, Length(List));
+    { Get the TAsyncCall events }
     for I := 0 to High(List) do
     begin
       if (List[I] <> nil) and Supports(List[I], IAsyncCallEx, EventIntf) then
       begin
-        Events[Count] := EventIntf.GetEvent;
-        if Events[Count] <> 0 then
+        WaitHandles[Count] := EventIntf.GetEvent;
+        if WaitHandles[Count] <> 0 then
         begin
           Mapping[Count] := I;
           Inc(Count);
         end;
+      end
+      else
+      if not WaitAll then
+      begin
+        { There are synchron calls in List[] and the caller does not want to
+          wait for all handles. }
+        Result := I;
+        Exit;
       end;
+    end;
+
+    { Append other handles }
+    for I := 0 to High(Handles) do
+    begin
+      WaitHandles[Count] := Handles[I];
+      Mapping[Count] := Length(List) + I;
+      Inc(Count);
     end;
 
     { Wait for the async calls }
@@ -1173,7 +1131,7 @@ function InternalAsyncMultiSync(const List: array of IAsyncCall; WaitAll: Boolea
     begin
       if GetCurrentThreadId = MainThreadID then
       begin
-        SignalState := WaitForMultipleObjectsMainThread(Count, Events, WaitAll, Milliseconds, MsgWait, dwWakeMask);
+        SignalState := WaitForMultipleObjectsMainThread(Count, WaitHandles, WaitAll, Milliseconds, MsgWait, dwWakeMask);
         if SignalState = Count then // "message" was signaled
         begin
           Result := SignalState;
@@ -1184,7 +1142,7 @@ function InternalAsyncMultiSync(const List: array of IAsyncCall; WaitAll: Boolea
       begin
         if MsgWait then
         begin
-          SignalState := MsgWaitForMultipleObjects(Count, Events[0], WaitAll, Milliseconds, dwWakeMask);
+          SignalState := MsgWaitForMultipleObjects(Count, WaitHandles[0], WaitAll, Milliseconds, dwWakeMask);
           if SignalState = Count then // "message" was signaled
           begin
             Result := SignalState;
@@ -1192,10 +1150,12 @@ function InternalAsyncMultiSync(const List: array of IAsyncCall; WaitAll: Boolea
           end;
         end
         else
-          SignalState := WaitForMultipleObjects(Count, @Events[0], WaitAll, Milliseconds);
+          SignalState := WaitForMultipleObjects(Count, @WaitHandles[0], WaitAll, Milliseconds);
       end;
       if {(SignalState >= WAIT_OBJECT_0) and} (SignalState < WAIT_OBJECT_0 + Count) then
-        Result := Mapping[SignalState - WAIT_OBJECT_0]
+        Result := WAIT_OBJECT_0 + Mapping[SignalState - WAIT_OBJECT_0]
+      else if (SignalState >= WAIT_ABANDONED_0) and (SignalState < WAIT_ABANDONED_0 + Count) then
+        Result := WAIT_ABANDONED_0 + Mapping[SignalState - WAIT_ABANDONED_0] 
       else
         Result := -1;
     end
@@ -1203,7 +1163,7 @@ function InternalAsyncMultiSync(const List: array of IAsyncCall; WaitAll: Boolea
       Result := 0;
   end;
 
-  function InternalWaitAllInfinite(const List: array of IAsyncCall): Integer;
+  function InternalWaitAllInfinite(const List: array of IAsyncCall; const Handles: array of THandle): Integer;
   var
     I: Integer;
   begin
@@ -1211,6 +1171,14 @@ function InternalAsyncMultiSync(const List: array of IAsyncCall; WaitAll: Boolea
     for I := 0 to High(List) do
       if List[I] <> nil then
         List[I].Sync;
+
+    if Length(Handles) > 0 then
+    begin
+      if GetCurrentThreadId = MainThreadID then
+        WaitForMultipleObjectsMainThread(Length(Handles), Handles, True, INFINITE, False, 0)
+      else
+        WaitForMultipleObjects(Length(Handles), @Handles[0], True, INFINITE);
+    end;
     Result := 0;
   end;
 
@@ -1218,9 +1186,9 @@ begin
   if Length(List) > 0 then
   begin
     if WaitAll and (Milliseconds = INFINITE) and not MsgWait and (GetCurrentThreadId <> MainThreadId) then
-      Result := InternalWaitAllInfinite(List)
+      Result := InternalWaitAllInfinite(List, Handles)
     else
-      Result := InternalWait(List, WaitAll, Milliseconds, MsgWait, dwWakeMask);
+      Result := InternalWait(List, Handles, WaitAll, Milliseconds, MsgWait, dwWakeMask);
   end
   else
     Result := 0;
@@ -1229,13 +1197,25 @@ end;
 function AsyncMultiSync(const List: array of IAsyncCall; WaitAll: Boolean;
   Milliseconds: Cardinal): Integer;
 begin
-  Result := InternalAsyncMultiSync(List, WaitAll, Milliseconds, False, 0);
+  Result := InternalAsyncMultiSync(List, [], WaitAll, Milliseconds, False, 0);
+end;
+
+function AsyncMultiSyncEx(const List: array of IAsyncCall; const Handles: array of THandle;
+  WaitAll: Boolean = True; Milliseconds: Cardinal = INFINITE): Integer;
+begin
+  Result := InternalAsyncMultiSync(List, Handles, WaitAll, Milliseconds, False, 0);
 end;
 
 function MsgAsyncMultiSync(const List: array of IAsyncCall; WaitAll: Boolean;
   Milliseconds: Cardinal; dwWakeMask: DWORD): Integer;
 begin
-  Result := InternalAsyncMultiSync(List, WaitAll, Milliseconds, True, dwWakeMask);
+  Result := InternalAsyncMultiSync(List, [], WaitAll, Milliseconds, True, dwWakeMask);
+end;
+
+function MsgAsyncMultiSyncEx(const List: array of IAsyncCall; const Handles: array of THandle;
+  WaitAll: Boolean; Milliseconds: Cardinal; dwWakeMask: DWORD): Integer;
+begin
+  Result := InternalAsyncMultiSync(List, Handles, WaitAll, Milliseconds, True, dwWakeMask);
 end;
 
 procedure NotFinishedError(const FunctionName: string);
@@ -1379,7 +1359,7 @@ begin
     Result := nil;
   FAsyncCalls.UnlockList;
 
-  { There is nothing to do, go sleeping... }
+  { Nothing to do, go sleeping... }
   if Result = nil then
     Thread.Suspend;
 end;
@@ -1446,11 +1426,13 @@ end;
 
 procedure TThreadPool.MainThreadWndProc(var Msg: TMessage);
 begin
-  if Msg.Msg = WM_VCLSYNC then
-    TAsyncCall(Msg.LParam).InternExecuteAsyncCall;
-
-  with Msg do
-    Result := DefWindowProc(FMainThreadVclHandle, Msg, WParam, LParam);
+  case Msg.Msg of
+    WM_VCLSYNC:
+      TAsyncCall(Msg.LParam).InternExecuteAsyncCall;
+  else
+    with Msg do
+      Result := DefWindowProc(FMainThreadVclHandle, Msg, WParam, LParam);
+  end;
 end;
 
 procedure TThreadPool.ProcessMainThreadSync;
@@ -2138,12 +2120,122 @@ asm
   call InternLocalAsyncVclCall
 end;
 
+{----------------------------------------------------------------------------}
+
+type
+  TMainThreadContext = record
+    IntructionPointer: Pointer;
+    BasePointer: Pointer;
+    RetAddr: Pointer;
+
+    MainBasePointer: Pointer;
+    ContextRetAddr: Pointer;
+    FinallyRetAddr: Pointer;
+  end;
+
+var
+  MainThreadContext: TMainThreadContext;
+  MainThreadContextCritSect: TRTLCriticalSection;
+
+procedure ExecuteInMainThread(Data: TObject);
+asm
+  push ebp
+
+  mov eax, OFFSET MainThreadContext
+
+  { Backup main thread's state }
+  mov [eax].TMainThreadContext.MainBasePointer, ebp
+  mov edx, OFFSET @@Leave
+  mov [eax].TMainThreadContext.ContextRetAddr, edx
+
+  { Switch to the thread's state }
+  mov ebp, [eax].TMainThreadContext.BasePointer
+  mov edx, [eax].TMainThreadContext.IntructionPointer
+  mov ecx, [eax].TMainThreadContext.RetAddr
+
+  { Jump the the user's synchronized code }
+  jmp edx
+
+  { LeaveMainThread() will jump to this address after it has restored the main
+    thread's state. }
+@@Leave:
+  pop ebp
+end;
+
+procedure LeaveMainThread;
+asm
+  call GetCurrentThreadId
+  cmp eax, [MainThreadId]
+  jne @@InMainThread
+
+  { Backup the return addresses }
+  pop edx // procedure return address
+  pop ecx // finally return address 
+
+  mov eax, OFFSET MainThreadContext
+  mov [eax].TMainThreadContext.FinallyRetAddr, ecx
+  mov [eax].TMainThreadContext.RetAddr, edx
+
+  { Restore the main thread's state }
+  mov ebp, [eax].TMainThreadContext.MainBasePointer
+  mov edx, [eax].TMainThreadContext.ContextRetAddr
+  jmp edx
+
+@@InMainThread:
+end;
+
+procedure EnterMainThread;
+asm
+  { There is nothing to do if we are already in the main thread }
+  call GetCurrentThreadId
+  cmp eax, [MainThreadId]
+  je @@InMainThread
+
+  mov eax, OFFSET MainThreadContextCritSect
+  push eax
+  call EnterCriticalSection
+
+  { Take the return address from the stack to "clean" the stack }
+  pop edx
+
+  { Backup the current thread state }
+  mov eax, OFFSET MainThreadContext
+  mov [eax].TMainThreadContext.IntructionPointer, edx
+  mov [eax].TMainThreadContext.BasePointer, ebp
+
+  { Call Synchronize(nil, TMethod(ExecuteInMainThread)) }
+  xor eax, eax // ClassType => isn't used in StaticSynchronize/Synchronize
+  xor edx, edx
+  push edx
+  mov ecx, OFFSET ExecuteInMainThread
+  push ecx
+  call TThread.StaticSynchronize
+
+  { Restore thread's state }
+  mov eax, OFFSET MainThreadContext
+  mov ebp, [eax].TMainThreadContext.BasePointer
+  mov ecx, [eax].TMainThreadContext.FinallyRetAddr
+  mov edx, [eax].TMainThreadContext.RetAddr
+
+  push ecx
+  push edx  // put return address back to the stack
+
+  mov eax, OFFSET MainThreadContextCritSect
+  push eax
+  call LeaveCriticalSection
+
+@@InMainThread:
+end;
+
+
 initialization
   ThreadPool := TThreadPool.Create;
+  InitializeCriticalSection(MainThreadContextCritSect);
 
 finalization
   ThreadPool.Free;
   ThreadPool := nil;
+  DeleteCriticalSection(MainThreadContextCritSect);
 
 end.
 
