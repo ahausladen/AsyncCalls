@@ -23,6 +23,8 @@
 
 unit AsyncCalls;
 
+{.$DEFINE DEBUGASYNCCALLS}
+
 interface
 
 {$IFNDEF CONDITIONALEXPRESSIONS}
@@ -45,7 +47,6 @@ interface
   {$DEFINE SUPPORTS_INLINE}
 {$IFEND}
 
-{.$DEFINE DEBUGASYNCCALLS}
 {$IFDEF DEBUGASYNCCALLS}
   {$D+,C+}
 {$ENDIF DEBUGASYNCCALLS}
@@ -127,8 +128,9 @@ function GetMaxAsyncCallThreads: Integer;
 
 { AsyncCall() executes the given function/procedure in a separate thread. The
   result value of the asynchronous function is returned by IAsyncCall.Sync() and
-  IAsyncCall.ReturnValue(). The AsyncExec() function calls the IdleMsgMethod while
-  the async. function/method is executed.
+  IAsyncCall.ReturnValue().
+  The AsyncExec() function calls the IdleMsgMethod in a loop, while the async.
+  method is executed.
 
 Example:
   function FileAgeAsync(const Filename: string): Integer;
@@ -364,14 +366,17 @@ function MsgAsyncMultiSyncEx(const List: array of IAsyncCall; const Handles: arr
 
 {
    EnterMainThread/LeaveMainThread can be used to temporary switch to the
-   main thread. The code that should be synchonized (blocking) must be put
+   main thread. The code that should be synchonized (blocking) has to be put
    into a try/finally block and the LeaveMainThread() function must be called
-   from within the finally block. A missing try/finally will lead to an
-   access violation.
-   All local variables can be used. (EBP points to the thread's stack while
-   ESP points the the main thread's stack)
-   The integrated Debugger is not able to follow the program flow. You have
-   to use break points instead of "Step over/in".
+   from the finally block. A missing try/finally will lead to an access violation.
+   
+   * All local variables can be used. (EBP points to the thread's stack while
+     ESP points the the main thread's stack)
+   * Unhandled exceptions are passed to the surrounding thread.
+   * The integrated Debugger is not able to follow the execution flow. You have
+     to use break points instead of "Step over/in".
+   * Nested calls to EnterMainThread/LeaveMainThread are ignored. But they must
+     strictly follow the try/finally structure.
 
    Example:
 
@@ -401,6 +406,8 @@ implementation
 resourcestring
   RsAsyncCallNotFinished = 'The asynchronous call is not finished yet';
   RsAsyncCallUnknownVarRecType = 'Unknown TVarRec type %d';
+  RsLeaveMainThreadNestedError = 'Unpaired call to AsyncCalls.LeaveMainThread()';
+  RsLeaveMainThreadThreadError = 'AsyncCalls.LeaveMainThread() was called outside of the main thread';
 
 type
   TAsyncCall = class;
@@ -471,6 +478,7 @@ type
     FFatalErrorAddr: Pointer;
     FForceDifferentThread: Boolean;
     procedure InternExecuteAsyncCall;
+    procedure InternExecuteSyncCall;
     procedure Quit(AReturnValue: Integer);
   protected
     { Decendants must implement this method. It is called  when the async call
@@ -954,7 +962,7 @@ var
 begin
   Call := TAsyncCallArrayOfConst.Create(Proc, Args);
   if ThreadPool.MaxThreads = 0 then
-    Call.InternExecuteAsyncCall
+    Call.InternExecuteSyncCall
   else
     Call.ExecuteAsync;
   Result := Call;
@@ -966,7 +974,7 @@ var
 begin
   Call := TAsyncCallArrayOfConst.Create(Proc.Code, TObject(Proc.Data), Args);
   if ThreadPool.MaxThreads = 0 then
-    Call.InternExecuteAsyncCall
+    Call.InternExecuteSyncCall
   else
     Call.ExecuteAsync;
   Result := Call;
@@ -1244,32 +1252,22 @@ end;
 procedure TAsyncCallThread.Execute;
 var
   FAsyncCall: TAsyncCall;
-  //MainWnd: THandle;
   CoInitialized: Boolean;
 begin
   CoInitialized := CoInitialize(nil) = S_OK;
   try
     while not Terminated do
     begin
-      FAsyncCall := ThreadPool.GetNextAsyncCall(Self); { calls Suspend if nothing has to be done. }
+      FAsyncCall := ThreadPool.GetNextAsyncCall(Self); // calls Suspend if nothing has to be done.
       if FAsyncCall <> nil then
       begin
         try
           FAsyncCall.InternExecuteAsyncCall;
         except
+          {$IFDEF DEBUGASYNCCALLS}
           on E: Exception do
-          begin
-            {$IFDEF DEBUGASYNCCALLS}
             OutputDebugString(PChar('[' + E.ClassName + '] ' + E.Message));
-            {$ENDIF DEBUGASYNCCALLS}
-            {MainWnd := 0;
-            EnumThreadWindows(MainThreadID, @GetMainWnd, Integer(@MainWnd));
-            if Windows.GetParent(MainWnd) <> 0 then
-              MainWnd := Windows.GetParent(MainWnd);
-            MessageBox(MainWnd, PChar(E.Message), PChar(string(E.ClassName)), MB_OK or MB_ICONERROR);}
-            FAsyncCall.FFatalErrorAddr := ErrorAddr;
-            FAsyncCall.FFatalException := AcquireExceptionObject;
-          end;
+          {$ENDIF DEBUGASYNCCALLS}
         end;
       end;
     end;
@@ -1428,7 +1426,7 @@ procedure TThreadPool.MainThreadWndProc(var Msg: TMessage);
 begin
   case Msg.Msg of
     WM_VCLSYNC:
-      TAsyncCall(Msg.LParam).InternExecuteAsyncCall;
+      TAsyncCall(Msg.LParam).InternExecuteSyncCall;
   else
     with Msg do
       Result := DefWindowProc(FMainThreadVclHandle, Msg, WParam, LParam);
@@ -1520,9 +1518,16 @@ begin
   Value := 0;
   try
     Value := ExecuteAsyncCall;
-  finally
-    Quit(Value);
+  except
+    FFatalErrorAddr := ErrorAddr;
+    FFatalException := AcquireExceptionObject;
   end;
+  Quit(Value);
+end;
+
+procedure TAsyncCall.InternExecuteSyncCall;
+begin
+  Quit( ExecuteAsyncCall() );
 end;
 
 procedure TAsyncCall.Quit(AReturnValue: Integer);
@@ -1587,7 +1592,7 @@ begin
         queue and execute it in the current thread. }
       if ThreadPool.RemoveAsyncCall(Self) then
       begin
-        InternExecuteAsyncCall;
+        InternExecuteSyncCall;
         Result := True;
       end;
     end;
@@ -2124,6 +2129,9 @@ end;
 
 type
   TMainThreadContext = record
+    MainThreadEntered: Longint;
+    MainThreadOpenBlockCount: Longint;
+    
     IntructionPointer: Pointer;
     BasePointer: Pointer;
     RetAddr: Pointer;
@@ -2143,45 +2151,83 @@ asm
 
   mov eax, OFFSET MainThreadContext
 
-  { Backup main thread's state }
-  mov [eax].TMainThreadContext.MainBasePointer, ebp
+  { Backup main thread state }
   mov edx, OFFSET @@Leave
   mov [eax].TMainThreadContext.ContextRetAddr, edx
+  mov [eax].TMainThreadContext.MainBasePointer, ebp
 
-  { Switch to the thread's state }
+  { Set "nested call" control }
+  mov ecx, [eax].TMainThreadContext.MainThreadOpenBlockCount
+  mov [eax].TMainThreadContext.MainThreadEntered, ecx
+  inc ecx
+  mov [eax].TMainThreadContext.MainThreadOpenBlockCount, ecx
+
+  { Switch to the thread state }
   mov ebp, [eax].TMainThreadContext.BasePointer
   mov edx, [eax].TMainThreadContext.IntructionPointer
-  mov ecx, [eax].TMainThreadContext.RetAddr
 
-  { Jump the the user's synchronized code }
+  { Jump to the user's synchronized code }
   jmp edx
 
   { LeaveMainThread() will jump to this address after it has restored the main
-    thread's state. }
+    thread state. }
 @@Leave:
   pop ebp
 end;
 
+procedure LeaveMainThreadError(ErrorMode: Integer);
+begin
+  case ErrorMode of
+    0: raise Exception.Create(RsLeaveMainThreadNestedError);
+    1: raise Exception.Create(RsLeaveMainThreadThreadError);
+  end;
+end;
+
 procedure LeaveMainThread;
 asm
+  { Check if we are in the main thread }
   call GetCurrentThreadId
   cmp eax, [MainThreadId]
-  jne @@InMainThread
+  jne @@ThreadError
 
-  { Backup the return addresses }
-  pop edx // procedure return address
-  pop ecx // finally return address 
+  { "nested call" control }
+  mov eax, OFFSET MainThreadContext
+  mov ecx, [eax].TMainThreadContext.MainThreadOpenBlockCount
+  dec ecx
+  js @@NestedError
+  mov [eax].TMainThreadContext.MainThreadOpenBlockCount, ecx
+  cmp ecx, [eax].TMainThreadContext.MainThreadEntered
+  jne @@Leave
+  { release "nested call" control }
+  mov [eax].TMainThreadContext.MainThreadEntered, -1
+
+  { If there is an exception the Classes.CheckSynchronize function will handle the
+    exception and thread switch for us. Will also restore the EBP regíster. }
+  call System.ExceptObject
+  or eax, eax
+  jnz @@InException
 
   mov eax, OFFSET MainThreadContext
+  { Backup the return addresses }
+  pop edx // procedure return address
+  pop ecx // finally return address
   mov [eax].TMainThreadContext.FinallyRetAddr, ecx
   mov [eax].TMainThreadContext.RetAddr, edx
 
-  { Restore the main thread's state }
+  { Restore the main thread state }
   mov ebp, [eax].TMainThreadContext.MainBasePointer
   mov edx, [eax].TMainThreadContext.ContextRetAddr
   jmp edx
 
-@@InMainThread:
+@@NestedError:
+  xor eax, eax
+  call LeaveMainThreadError
+@@ThreadError:
+  mov eax, 1
+  call LeaveMainThreadError
+
+@@InException:
+@@Leave:
 end;
 
 procedure EnterMainThread;
@@ -2191,6 +2237,7 @@ asm
   cmp eax, [MainThreadId]
   je @@InMainThread
 
+  { Enter critical section => implicit waiting queue }
   mov eax, OFFSET MainThreadContextCritSect
   push eax
   call EnterCriticalSection
@@ -2200,36 +2247,65 @@ asm
 
   { Backup the current thread state }
   mov eax, OFFSET MainThreadContext
+  mov [eax].TMainThreadContext.MainThreadEntered, ecx
   mov [eax].TMainThreadContext.IntructionPointer, edx
   mov [eax].TMainThreadContext.BasePointer, ebp
 
+  { Begin try/finally }
+@@Try:
+  xor eax, eax
+  push ebp
+  push OFFSET @@HandleFinally
+  push dword ptr fs:[eax]
+  mov fs:[eax], esp
+
   { Call Synchronize(nil, TMethod(ExecuteInMainThread)) }
-  xor eax, eax // ClassType => isn't used in StaticSynchronize/Synchronize
+  //xor eax, eax // ClassType isn't used in StaticSynchronize/Synchronize
   xor edx, edx
   push edx
   mov ecx, OFFSET ExecuteInMainThread
   push ecx
   call TThread.StaticSynchronize
 
-  { Restore thread's state }
+  { Clean up try/finally }
+  xor eax,eax
+  pop edx
+  pop ecx
+  pop ecx
+  mov fs:[eax], edx
+
+  { Restore thread state }
   mov eax, OFFSET MainThreadContext
   mov ebp, [eax].TMainThreadContext.BasePointer
   mov ecx, [eax].TMainThreadContext.FinallyRetAddr
   mov edx, [eax].TMainThreadContext.RetAddr
 
-  push ecx
+  push ecx  // put finally return address back to the stack
   push edx  // put return address back to the stack
 
+  { End try/finally }
+@@Finally:
   mov eax, OFFSET MainThreadContextCritSect
   push eax
   call LeaveCriticalSection
+  ret
+@@HandleFinally:
+  jmp System.@HandleFinally
+  jmp @@Finally
+@@LeaveFinally:
+  ret
 
 @@InMainThread:
+  { Adjust "nested call" control.
+    Threadsafe because we are in the main thread and only the main thread
+    manipulates MainThreadOpenBlockCount }
+  inc [MainThreadContext].TMainThreadContext.MainThreadOpenBlockCount
 end;
 
 
 initialization
   ThreadPool := TThreadPool.Create;
+  MainThreadContext.MainThreadEntered := -1;
   InitializeCriticalSection(MainThreadContextCritSect);
 
 finalization
