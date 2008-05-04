@@ -420,7 +420,7 @@ resourcestring
   RsLeaveMainThreadThreadError = 'AsyncCalls.LeaveMainThread() was called outside of the main thread';
 
 {$IFDEF DELPHI6}
-threadvar
+var
   OrgWakeMainThread: TNotifyEvent;
 
 var
