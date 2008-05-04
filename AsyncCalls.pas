@@ -23,7 +23,7 @@
 
 unit AsyncCalls;
 
-{.$DEFINE DEBUGASYNCCALLS}
+{.$DEFINE DEBUG_ASYNCCALLS}
 
 interface
 
@@ -47,9 +47,9 @@ interface
   {$DEFINE SUPPORTS_INLINE}
 {$IFEND}
 
-{$IFDEF DEBUGASYNCCALLS}
+{$IFDEF DEBUG_ASYNCCALLS}
   {$D+,C+}
-{$ENDIF DEBUGASYNCCALLS}
+{$ENDIF DEBUG_ASYNCCALLS}
 
 uses
   Windows, Messages, SysUtils, Classes, Contnrs, ActiveX, SyncObjs;
@@ -110,7 +110,7 @@ type
       exception if called before the function has finished. }
     function ReturnValue: Integer;
 
-    { ForceDifferentThread() tells AsyncCall that the assigned function must
+    { ForceDifferentThread() tells AsyncCalls that the assigned function must
       not be executed in the current thread. }
     procedure ForceDifferentThread;
   end;
@@ -174,8 +174,9 @@ procedure AsyncExec(Method: TNotifyEvent; Arg: TObject; IdleMsgMethod: TAsyncIdl
 
 { LocalAsyncCall() executes the given local function/procedure in a separate thread.
   The result value of the asynchronous function is returned by IAsyncCall.Sync() and
-  IAsyncCall.ReturnValue(). The LocalAsyncExec() function calls the IdleMsgMethod while
-  the local procedure is executed.
+  IAsyncCall.ReturnValue().
+  The LocalAsyncExec() function calls the IdleMsgMethod while the local procedure is
+  executed.
 
 Example:
   procedure MainProc(const S: string);
@@ -205,7 +206,7 @@ procedure LocalAsyncExec(Proc: TLocalAsyncProc; IdleMsgMethod: TAsyncIdleMsgMeth
 
 
 { LocalVclCall() executes the given local function/procedure in the main thread. It
-  uses the TThread.Synchronize function which cause blocking of the current thread.
+  uses the TThread.Synchronize function which blocks the current thread.
   LocalAsyncVclCall() execute the given local function/procedure in the main thread.
   It does not wait for the main thread to execute the function unless the current
   thread is the main thread. In that case it executes and waits for the specified
@@ -316,19 +317,27 @@ function AsyncCall(Proc: TCdeclFunc; const Args: array of const): IAsyncCall; ov
 function AsyncCall(Proc: TCdeclMethod; const Args: array of const): IAsyncCall; overload;
 
 
+
 { AsyncMultiSync() waits for the async calls and other handles to finish.
   MsgAsyncMultiSync() waits for the async calls, other handles and the message queue.
 
   Arguments:
+    List            : An array of IAsyncCall interfaces for which the function
+                      should wait.
+
+    Handles         : An array of THandle for which the function should wait.
+
     WaitAll = True  : The function returns when all listed async calls have
                       finished. If Milliseconds is INFINITE the async calls
                       meight be executed in the current thread.
                       The return value is zero when all async calls have finished.
                       Otherwise it is -1.
+                      
     WaitAll = False : The function returns when at least one of the async calls
                       has finished. The return value is the list index of the
                       first finished async call. If there was a timeout, the
                       return value is -1.
+
     Milliseconds    : Specifies the number of milliseconds to wait until a
                       timeout happens. The value INFINITE lets the function wait
                       until all async calls have finished.
@@ -1228,10 +1237,10 @@ end;
 
 procedure NotFinishedError(const FunctionName: string);
 begin
-  {$IFDEF DEBUGASYNCCALLS}
+  {$IFDEF DEBUG_ASYNCCALLS}
   if FunctionName <> '' then
     OutputDebugString(PChar(FunctionName));
-  {$ENDIF DEBUGASYNCCALLS}
+  {$ENDIF DEBUG_ASYNCCALLS}
   raise EAsyncCallError.Create(RsAsyncCallNotFinished);
 end;
 
@@ -1264,10 +1273,10 @@ begin
         try
           FAsyncCall.InternExecuteAsyncCall;
         except
-          {$IFDEF DEBUGASYNCCALLS}
+          {$IFDEF DEBUG_ASYNCCALLS}
           on E: Exception do
             OutputDebugString(PChar('[' + E.ClassName + '] ' + E.Message));
-          {$ENDIF DEBUGASYNCCALLS}
+          {$ENDIF DEBUG_ASYNCCALLS}
         end;
       end;
     end;
