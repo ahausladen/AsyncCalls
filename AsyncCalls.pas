@@ -31,7 +31,8 @@ interface
   'Your compiler version is not supported'
 {$ELSE}
   {$IFDEF VER140}
-    {$MESSAGE ERROR 'Your compiler version is not supported'}
+    {$DEFINE DELPHI6}
+    {.$MESSAGE ERROR 'Your compiler version is not supported'}
   {$ENDIF}
 {$ENDIF}
 
@@ -417,6 +418,61 @@ resourcestring
   RsAsyncCallUnknownVarRecType = 'Unknown TVarRec type %d';
   RsLeaveMainThreadNestedError = 'Unpaired call to AsyncCalls.LeaveMainThread()';
   RsLeaveMainThreadThreadError = 'AsyncCalls.LeaveMainThread() was called outside of the main thread';
+
+{$IFDEF DELPHI6}
+threadvar
+  OrgWakeMainThread: TNotifyEvent;
+
+var
+  SyncEvent: THandle;
+
+type
+  TThread = class(Classes.TThread)
+  private
+    class procedure WakeMainThread(Sender: TObject);
+  public
+    class procedure StaticSynchronize(AThread: TThread; AMethod: TThreadMethod);
+  end;
+
+class procedure TThread.StaticSynchronize(AThread: TThread; AMethod: TThreadMethod);
+var
+  Obj: TThread;
+begin
+  if GetCurrentThreadId = MainThreadId then
+    AMethod
+  else if AThread <> nil then
+    AThread.Synchronize(AMethod)
+  else
+  begin
+    {$WARNINGS OFF}
+    Obj := TThread.Create(True);
+    {$WARNINGS ON}
+    try
+      Obj.Synchronize(AMethod);
+    finally
+      Obj.Free;
+    end;
+  end;
+end;
+
+class procedure TThread.WakeMainThread(Sender: TObject);
+begin
+  if Assigned(OrgWakeMainThread) then
+    OrgWakeMainThread(Sender);
+  SetEvent(SyncEvent);
+end;
+
+procedure HookWakeMainThread;
+begin
+  OrgWakeMainThread := Classes.WakeMainThread;
+  Classes.WakeMainThread := TThread.WakeMainThread;
+end;
+
+procedure UnhookWakeMainThread;
+begin
+  Classes.WakeMainThread := OrgWakeMainThread;
+end;
+{$ENDIF DELPHI6}
 
 type
   TAsyncCall = class;
@@ -997,8 +1053,12 @@ var
   Handles: array[0..2] of THandle;
 begin
   Handles[0] := AHandle;
-  Handles[1] := Classes.SyncEvent;
+  Handles[1] := SyncEvent;
   Handles[2] := ThreadPool.MainThreadSyncEvent;
+  {$IFDEF DELPHI6}
+  HookWakeMainThread;
+  try
+  {$ENDIF DELPHI6}
   repeat
     if MsgWait then
     begin
@@ -1013,10 +1073,15 @@ begin
     else
       Result := WaitForMultipleObjects(3, @Handles[0], False, Timeout);
     if Result = WAIT_OBJECT_0 + 1 then
-      CheckSynchronize(0)
+      CheckSynchronize
     else if Result = WAIT_OBJECT_0 + 2 then
       ThreadPool.ProcessMainThreadSync;
   until (Result <> WAIT_OBJECT_0 + 1) and (Result <> WAIT_OBJECT_0 + 2);
+  {$IFDEF DELPHI6}
+  finally
+    UnhookWakeMainThread;
+  end;
+  {$ENDIF DELPHI6}
 end;
 
 function WaitForMultipleObjectsMainThread(Count: Cardinal;
@@ -1030,8 +1095,12 @@ begin
   { Wait for the specified events, for the VCL SyncEvent and for the MainThreadSync event }
   SetLength(Handles, Count + 2);
   Move(AHandles[0], Handles[0], Count * SizeOf(THandle));
-  Handles[Count] := Classes.SyncEvent;
+  Handles[Count] := SyncEvent;
   Handles[Count + 1] := ThreadPool.MainThreadSyncEvent;
+  {$IFDEF DELPHI6}
+  HookWakeMainThread;
+  try
+  {$ENDIF DELPHI6}
   if not WaitAll then
   begin
     repeat
@@ -1049,7 +1118,7 @@ begin
         Result := WaitForMultipleObjects(Count + 2, @Handles[0], WaitAll, Timeout);
 
       if Result = WAIT_OBJECT_0 + Count then
-        CheckSynchronize(0)
+        CheckSynchronize
       else if Result = WAIT_OBJECT_0 + Count + 1 then
         ThreadPool.ProcessMainThreadSync;
     until (Result <> WAIT_OBJECT_0 + Count) and (Result <> WAIT_OBJECT_0 + Count + 1);
@@ -1072,7 +1141,7 @@ begin
         Result := WaitForMultipleObjects(Count + 2, @Handles[0], False, Timeout);
 
       if Result = WAIT_OBJECT_0 + Count then
-        CheckSynchronize(0)
+        CheckSynchronize
       else if Result = WAIT_OBJECT_0 + Count + 1 then
         ThreadPool.ProcessMainThreadSync
       else
@@ -1093,6 +1162,11 @@ begin
     if Count = 0 then
       Result := FirstFinished;
   end;
+  {$IFDEF DELPHI6}
+  finally
+    UnhookWakeMainThread;
+  end;
+  {$ENDIF DELPHI6}
 end;
 
 { ---------------------------------------------------------------------------- }
@@ -2097,7 +2171,7 @@ begin
   begin
     M.Code := @LocalVclCallProc;
     M.Data := @Data;
-    TThread.Synchronize(nil, TThreadMethod(M));
+    TThread.StaticSynchronize(nil, TThreadMethod(M));
   end;
 end;
 
@@ -2315,12 +2389,19 @@ end;
 initialization
   ThreadPool := TThreadPool.Create;
   MainThreadContext.MainThreadEntered := -1;
+  {$IFDEF DELPHi6}
+  SyncEvent := CreateEvent(nil, False, False, nil);
+  {$ENDIF DELPHi6}
   InitializeCriticalSection(MainThreadContextCritSect);
 
 finalization
   ThreadPool.Free;
   ThreadPool := nil;
   DeleteCriticalSection(MainThreadContextCritSect);
+  {$IFDEF DELPHi6}
+  CloseHandle(SyncEvent);
+  SyncEvent := 0;
+  {$ENDIF DELPHI6}
 
 end.
 
