@@ -2266,11 +2266,18 @@ begin
   end;
 end;
 
+function GetMainThreadId: LongWord;
+begin
+  Result := MainThreadId;
+end;
+
 procedure LeaveMainThread;
 asm
   { Check if we are in the main thread }
   call GetCurrentThreadId
-  cmp eax, [MainThreadId]
+  mov ecx, eax
+  call GetMainThreadId
+  cmp eax, ecx
   jne @@ThreadError
 
   { "nested call" control }
@@ -2317,7 +2324,9 @@ procedure EnterMainThread;
 asm
   { There is nothing to do if we are already in the main thread }
   call GetCurrentThreadId
-  cmp eax, [MainThreadId]
+  mov ecx, eax
+  call GetMainThreadId
+  cmp eax, ecx
   je @@InMainThread
 
   { Enter critical section => implicit waiting queue }
