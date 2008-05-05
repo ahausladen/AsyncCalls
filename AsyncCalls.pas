@@ -2214,7 +2214,7 @@ type
   TMainThreadContext = record
     MainThreadEntered: Longint;
     MainThreadOpenBlockCount: Longint;
-    
+
     IntructionPointer: Pointer;
     BasePointer: Pointer;
     RetAddr: Pointer;
@@ -2222,6 +2222,9 @@ type
     MainBasePointer: Pointer;
     ContextRetAddr: Pointer;
     FinallyRetAddr: Pointer;
+
+    MainRegEBX, MainRegEDI, MainRegESI: Pointer;
+    ThreadRegEBX, ThreadRegEDI, ThreadRegESI: Pointer;
   end;
 
 var
@@ -2239,6 +2242,11 @@ asm
   mov [eax].TMainThreadContext.ContextRetAddr, edx
   mov [eax].TMainThreadContext.MainBasePointer, ebp
 
+  { Backup main thread registers }
+  mov [eax].TMainThreadContext.MainRegEBX, ebx
+  mov [eax].TMainThreadContext.MainRegEDI, edi
+  mov [eax].TMainThreadContext.MainRegESI, esi
+
   { Set "nested call" control }
   mov ecx, [eax].TMainThreadContext.MainThreadOpenBlockCount
   mov [eax].TMainThreadContext.MainThreadEntered, ecx
@@ -2248,6 +2256,11 @@ asm
   { Switch to the thread state }
   mov ebp, [eax].TMainThreadContext.BasePointer
   mov edx, [eax].TMainThreadContext.IntructionPointer
+
+  { Swicth to the thread registers }
+  mov ebx, [eax].TMainThreadContext.ThreadRegEBX
+  mov edi, [eax].TMainThreadContext.ThreadRegEDI
+  mov esi, [eax].TMainThreadContext.ThreadRegESI
 
   { Jump to the user's synchronized code }
   jmp edx
@@ -2288,8 +2301,18 @@ asm
   mov [eax].TMainThreadContext.MainThreadOpenBlockCount, ecx
   cmp ecx, [eax].TMainThreadContext.MainThreadEntered
   jne @@Leave
-  { release "nested call" control }
+  { Release "nested call" control }
   mov [eax].TMainThreadContext.MainThreadEntered, -1
+
+  { Save the current registers for the return, the compiler might have
+    generated code that changed the registers in the synchronized code. }
+  mov [eax].TMainThreadContext.ThreadRegEBX, ebx
+  mov [eax].TMainThreadContext.ThreadRegEDI, edi
+  mov [eax].TMainThreadContext.ThreadRegESI, esi
+  { Restore main thread registers }
+  mov ebx, [eax].TMainThreadContext.MainRegEBX
+  mov edi, [eax].TMainThreadContext.MainRegEDI
+  mov esi, [eax].TMainThreadContext.MainRegESI
 
   { If there is an exception the Classes.CheckSynchronize function will handle the
     exception and thread switch for us. Will also restore the EBP regíster. }
@@ -2342,6 +2365,10 @@ asm
   mov [eax].TMainThreadContext.MainThreadEntered, ecx
   mov [eax].TMainThreadContext.IntructionPointer, edx
   mov [eax].TMainThreadContext.BasePointer, ebp
+  { Backup the current thread registers }
+  mov [eax].TMainThreadContext.ThreadRegEBX, ebx
+  mov [eax].TMainThreadContext.ThreadRegEDI, edi
+  mov [eax].TMainThreadContext.ThreadRegESI, esi
 
   { Begin try/finally }
 @@Try:
@@ -2377,6 +2404,13 @@ asm
 
   { End try/finally }
 @@Finally:
+  { Restore thread registers } 
+  mov eax, OFFSET MainThreadContext
+  mov ebx, [eax].TMainThreadContext.ThreadRegEBX
+  mov edi, [eax].TMainThreadContext.ThreadRegEDI
+  mov esi, [eax].TMainThreadContext.ThreadRegESI
+
+  { Leave critical section }
   mov eax, OFFSET MainThreadContextCritSect
   push eax
   call LeaveCriticalSection
