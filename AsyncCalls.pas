@@ -2220,11 +2220,14 @@ type
     RetAddr: Pointer;
 
     MainBasePointer: Pointer;
+    MainStackPointerStart: Pointer;
     ContextRetAddr: Pointer;
-    FinallyRetAddr: Pointer;
 
     MainRegEBX, MainRegEDI, MainRegESI: Pointer;
     ThreadRegEBX, ThreadRegEDI, ThreadRegESI: Pointer;
+
+    StackBufferCount: Longint;
+    StackBuffer: array of Pointer;
   end;
 
 var
@@ -2241,6 +2244,7 @@ asm
   mov edx, OFFSET @@Leave
   mov [eax].TMainThreadContext.ContextRetAddr, edx
   mov [eax].TMainThreadContext.MainBasePointer, ebp
+  mov [eax].TMainThreadContext.MainStackPointerStart, esp
 
   { Backup main thread registers }
   mov [eax].TMainThreadContext.MainRegEBX, ebx
@@ -2279,6 +2283,16 @@ begin
   end;
 end;
 
+function InitStackBuffer(Count: Integer): Pointer;
+begin
+  MainThreadContext.StackBufferCount := Count;
+  SetLength(MainThreadContext.StackBuffer, Count);
+  if Count > 0 then
+    Result := @MainThreadContext.StackBuffer[0]
+  else
+    Result := nil;
+end;
+
 function GetMainThreadId: LongWord;
 begin
   Result := MainThreadId;
@@ -2314,22 +2328,56 @@ asm
   mov edi, [eax].TMainThreadContext.MainRegEDI
   mov esi, [eax].TMainThreadContext.MainRegESI
 
-  { If there is an exception the Classes.CheckSynchronize function will handle the
-    exception and thread switch for us. Will also restore the EBP regíster. }
-  call System.ExceptObject
-  or eax, eax
-  jnz @@InException
+  { Detect if the finally block is called by System._HandleFinally.
+    In that case an exception was raised in the MainThread-Block. The
+    Classes.CheckSynchronize function will handle the exception and the
+    thread switch for us. This will also restore the EBP regíster. }
+  mov eax, [esp + $04] // finally return address
+  mov edx, OFFSET System.@HandleFinally
+  cmp eax, edx
+  jl @@NoException
+  mov edx, OFFSET System.@HandleAutoException
+  cmp eax, edx
+  jl @@InException
+@@NoException:
 
-  mov eax, OFFSET MainThreadContext
   { Backup the return addresses }
   pop edx // procedure return address
-  pop ecx // finally return address
-  mov [eax].TMainThreadContext.FinallyRetAddr, ecx
+
+  mov eax, OFFSET MainThreadContext
   mov [eax].TMainThreadContext.RetAddr, edx
 
+  { Pop all items from the stack that are between ESP and MainStackPointerStart
+    to an internal buffer that is pushed back on the stack in the
+    "EnterMainThread" leave-code. }
+  mov edx, [eax].TMainThreadContext.MainStackPointerStart
+  mov eax, edx
+  sub eax, esp
+  shr eax, 2 // todo: adjust for 64Bit
+  push edx // MainStackPointerStart => Stack
+  push eax // Stack item count => Stack
+
+  call InitStackBuffer // returns EAX=Pointer to first item
+
+  pop ecx // Stack item count <= Stack
+  pop edx // MainStackPointerStart <= Stack
+  // copy stack
+  or ecx, ecx
+  jz @@IgnoreCopyStackLoop
+  mov edx, eax
+@@CopyStackLoop:
+  pop eax
+  mov [edx], eax
+  add edx, 4
+  dec ecx
+  jnz @@CopyStackLoop
+@@IgnoreCopyStackLoop:
+
   { Restore the main thread state }
+  mov eax, OFFSET MainThreadContext
   mov ebp, [eax].TMainThreadContext.MainBasePointer
   mov edx, [eax].TMainThreadContext.ContextRetAddr
+  //mov esp, [eax].TMainThreadContext.MainStackPointerStart // fixes stack pointer
   jmp edx
 
 @@NestedError:
@@ -2396,11 +2444,28 @@ asm
   { Restore thread state }
   mov eax, OFFSET MainThreadContext
   mov ebp, [eax].TMainThreadContext.BasePointer
-  mov ecx, [eax].TMainThreadContext.FinallyRetAddr
-  mov edx, [eax].TMainThreadContext.RetAddr
 
-  push ecx  // put finally return address back to the stack
-  push edx  // put return address back to the stack
+  { Push the backuped stack items back to the stack }
+  mov ecx, [eax].TMainThreadContext.StackBufferCount
+  dec ecx
+  js @@IgnoreRestoreStack
+  mov eax, [eax].TMainThreadContext.StackBuffer
+  mov edx, ecx
+  shl edx, 2 // todo: Adjust for 64 bit
+  add eax, edx // move to buffer end
+@@RestoreStack:
+  mov edx, [eax]
+  add eax, -4
+  push edx
+  dec ecx
+  jns @@RestoreStack
+@@IgnoreRestoreStack:
+
+
+  { Put return address back to the stack }
+  mov eax, OFFSET MainThreadContext
+  mov edx, [eax].TMainThreadContext.RetAddr
+  push edx
 
   { End try/finally }
 @@Finally:
@@ -2447,4 +2512,3 @@ finalization
   {$ENDIF DELPHI6}
 
 end.
-
