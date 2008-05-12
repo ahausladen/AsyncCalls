@@ -28,25 +28,31 @@ unit AsyncCalls;
 interface
 
 {$IFNDEF CONDITIONALEXPRESSIONS}
-  'Your compiler version is not supported'
+  {$IFDEF VER130}
+    {$DEFINE DELPHI5}
+  {$ELSE}
+    'Your compiler version is not supported'
+  {$ENDIF}
 {$ELSE}
   {$IFDEF VER140}
     {$DEFINE DELPHI6}
     {.$MESSAGE ERROR 'Your compiler version is not supported'}
+  {$ELSE}
+    {$DEFINE DELPHI7_UP}
   {$ENDIF}
+
+  {$WARN SYMBOL_PLATFORM OFF}
+  {$WARN UNIT_PLATFORM OFF}
+  {$IF CompilerVersion >= 15.0}
+    {$WARN UNSAFE_TYPE OFF}
+    {$WARN UNSAFE_CODE OFF}
+    {$WARN UNSAFE_CAST OFF}
+  {$IFEND}
+
+  {$IF CompilerVersion >= 18.0}
+    {$DEFINE SUPPORTS_INLINE}
+  {$IFEND}
 {$ENDIF}
-
-{$WARN SYMBOL_PLATFORM OFF}
-{$WARN UNIT_PLATFORM OFF}
-{$IF CompilerVersion >= 15.0}
-  {$WARN UNSAFE_TYPE OFF}
-  {$WARN UNSAFE_CODE OFF}
-  {$WARN UNSAFE_CAST OFF}
-{$IFEND}
-
-{$IF CompilerVersion >= 18.0}
-  {$DEFINE SUPPORTS_INLINE}
-{$IFEND}
 
 {$IFDEF DEBUG_ASYNCCALLS}
   {$D+,C+}
@@ -56,9 +62,14 @@ uses
   Windows, Messages, SysUtils, Classes, Contnrs, ActiveX, SyncObjs;
 
 type
-  {$IF not declared(INT_PTR)}
+  {$IFNDEF CONDITIONALEXPRESSIONS}
   INT_PTR = Integer;
-  {$IFEND}
+  IInterface = IUnknown;
+  {$ELSE}
+    {$IF not declared(INT_PTR)}
+  INT_PTR = Integer;
+    {$IFEND}
+  {$ENDIF}
 
   TAsyncIdleMsgMethod = procedure of object;
 
@@ -419,23 +430,27 @@ procedure LeaveMainThread;
 
 implementation
 
+{$IFDEF DELPHI5}
+uses
+  Forms; // AllocateHWnd
+{$ENDIF DELPHI5}
+
 resourcestring
   RsAsyncCallNotFinished = 'The asynchronous call is not finished yet';
   RsAsyncCallUnknownVarRecType = 'Unknown TVarRec type %d';
   RsLeaveMainThreadNestedError = 'Unpaired call to AsyncCalls.LeaveMainThread()';
   RsLeaveMainThreadThreadError = 'AsyncCalls.LeaveMainThread() was called outside of the main thread';
 
-{$IFDEF DELPHI6}
-var
-  OrgWakeMainThread: TNotifyEvent;
-
+{$IFNDEF DELPHI7_UP}
 var
   SyncEvent: THandle;
 
 type
   TThread = class(Classes.TThread)
+  {$IFDEF DELPHI6}
   private
     class procedure WakeMainThread(Sender: TObject);
+  {$ENDIF DELPHI6}
   public
     class procedure StaticSynchronize(AThread: TThread; AMethod: TThreadMethod);
   end;
@@ -450,7 +465,7 @@ begin
     AThread.Synchronize(AMethod)
   else
   begin
-    {$WARNINGS OFF}
+    {$WARNINGS OFF} // suppress abstract class warning
     Obj := TThread.Create(True);
     {$WARNINGS ON}
     try
@@ -460,6 +475,37 @@ begin
     end;
   end;
 end;
+{$ENDIF ~DELPHI7_UP}
+
+{$IFDEF DELPHI5}
+function CheckSynchronize(Timeout: Integer = 0): Boolean;
+begin
+  Result := False;
+end;
+
+function AcquireExceptionObject: Pointer;
+type
+  PRaiseFrame = ^TRaiseFrame;
+  TRaiseFrame = record
+    NextRaise: PRaiseFrame;
+    ExceptAddr: Pointer;
+    ExceptObject: TObject;
+    ExceptionRecord: PExceptionRecord;
+  end;
+begin
+  if RaiseList <> nil then
+  begin
+    Result := PRaiseFrame(RaiseList)^.ExceptObject;
+    PRaiseFrame(RaiseList)^.ExceptObject := nil;
+  end
+  else
+    Result := nil;
+end;
+{$ENDIF DELPHI5}
+
+{$IFDEF DELPHI6}
+var
+  OrgWakeMainThread: TNotifyEvent;
 
 class procedure TThread.WakeMainThread(Sender: TObject);
 begin
@@ -2459,7 +2505,6 @@ asm
   jns @@RestoreStack
 @@IgnoreRestoreStack:
 
-
   { Put return address back to the stack }
   mov eax, OFFSET MainThreadContext
   mov edx, [eax].TMainThreadContext.RetAddr
@@ -2495,18 +2540,18 @@ end;
 initialization
   ThreadPool := TThreadPool.Create;
   MainThreadContext.MainThreadEntered := -1;
-  {$IFDEF DELPHi6}
+  {$IFNDEF DELPHi7_UP}
   SyncEvent := CreateEvent(nil, False, False, nil);
-  {$ENDIF DELPHi6}
+  {$ENDIF ~DELPHi7_UP}
   InitializeCriticalSection(MainThreadContextCritSect);
 
 finalization
   ThreadPool.Free;
   ThreadPool := nil;
   DeleteCriticalSection(MainThreadContextCritSect);
-  {$IFDEF DELPHi6}
+  {$IFNDEF DELPHi7_UP}
   CloseHandle(SyncEvent);
   SyncEvent := 0;
-  {$ENDIF DELPHI6}
+  {$ENDIF ~DELPHi7_UP}
 
 end.
