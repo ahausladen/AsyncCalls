@@ -346,7 +346,7 @@ function AsyncCall(Proc: TCdeclMethod; const Args: array of const): IAsyncCall; 
     dwWakeMask      : see Windows.MsgWaitForMultipleObjects()
 
   Limitations:
-    Length(List)+Length(Handles) must not exceed 62.
+    Length(List)+Length(Handles) must not exceed MAXIMUM_ASYNC_WAIT_OBJECTS.
 
   Return value:
     WAIT_TIMEOUT
@@ -364,15 +364,21 @@ function AsyncCall(Proc: TCdeclMethod; const Args: array of const): IAsyncCall; 
     WAIT_ABANDONED_0+Length(List)+index
       The abandoned handle
 
+    WAIT_FAILED
+      The function failed
 }
+
+const
+  MAXIMUM_ASYNC_WAIT_OBJECTS = MAXIMUM_WAIT_OBJECTS - 3;
+
 function AsyncMultiSync(const List: array of IAsyncCall; WaitAll: Boolean = True;
-  Milliseconds: Cardinal = INFINITE): Integer;
+  Milliseconds: Cardinal = INFINITE): Cardinal;
 function AsyncMultiSyncEx(const List: array of IAsyncCall; const Handles: array of THandle;
-  WaitAll: Boolean = True; Milliseconds: Cardinal = INFINITE): Integer;
+  WaitAll: Boolean = True; Milliseconds: Cardinal = INFINITE): Cardinal;
 function MsgAsyncMultiSync(const List: array of IAsyncCall; WaitAll: Boolean;
-  Milliseconds: Cardinal; dwWakeMask: DWORD): Integer;
+  Milliseconds: Cardinal; dwWakeMask: DWORD): Cardinal;
 function MsgAsyncMultiSyncEx(const List: array of IAsyncCall; const Handles: array of THandle;
-  WaitAll: Boolean; Milliseconds: Cardinal; dwWakeMask: DWORD): Integer;
+  WaitAll: Boolean; Milliseconds: Cardinal; dwWakeMask: DWORD): Cardinal;
 
 {
    EnterMainThread/LeaveMainThread can be used to temporary switch to the
@@ -1047,8 +1053,7 @@ end;
 
 { ---------------------------------------------------------------------------- }
 
-function WaitForSingleObjectMainThread(AHandle: THandle; Timeout: Cardinal;
-  MsgWait: Boolean = False; dwWakeMask: DWORD = 0): Cardinal;
+function WaitForSingleObjectMainThread(AHandle: THandle; Timeout: Cardinal): Cardinal;
 var
   Handles: array[0..2] of THandle;
 begin
@@ -1060,18 +1065,7 @@ begin
   try
   {$ENDIF DELPHI6}
   repeat
-    if MsgWait then
-    begin
-      Result := MsgWaitForMultipleObjects(3, Handles[0], False, Timeout, dwWakeMask);
-      if Result = WAIT_OBJECT_0 + 3 then
-      begin
-        ThreadPool.ProcessMainThreadSync; // also uses the message queue
-        Result := WAIT_OBJECT_0 + 1; // caller doesn't know about the 2 synchronization events
-        Exit;
-      end;
-    end
-    else
-      Result := WaitForMultipleObjects(3, @Handles[0], False, Timeout);
+    Result := WaitForMultipleObjects(3, @Handles[0], False, Timeout);
     if Result = WAIT_OBJECT_0 + 1 then
       CheckSynchronize
     else if Result = WAIT_OBJECT_0 + 2 then
@@ -1090,9 +1084,10 @@ function WaitForMultipleObjectsMainThread(Count: Cardinal;
 var
   Handles: array of THandle;
   Index: Cardinal;
-  FirstFinished: Cardinal;
+  FirstFinished, OriginalCount: Cardinal;
 begin
   { Wait for the specified events, for the VCL SyncEvent and for the MainThreadSync event }
+  OriginalCount := Count;
   SetLength(Handles, Count + 2);
   Move(AHandles[0], Handles[0], Count * SizeOf(THandle));
   Handles[Count] := SyncEvent;
@@ -1110,7 +1105,7 @@ begin
         if Result = WAIT_OBJECT_0 + Count + 2 then
         begin
           ThreadPool.ProcessMainThreadSync; // also uses the message queue
-          Result := WAIT_OBJECT_0 + Count; // caller doesn't know about the 2 synchronization events
+          Result := WAIT_OBJECT_0 + OriginalCount; // caller doesn't know about the 2 synchronization events
           Exit;
         end;
       end
@@ -1133,7 +1128,7 @@ begin
         if Result = WAIT_OBJECT_0 + Count + 2 then
         begin
           ThreadPool.ProcessMainThreadSync; // also uses the message queue
-          Result := WAIT_OBJECT_0 + Count; // caller doesn't know about the 2 synchronization events
+          Result := WAIT_OBJECT_0 + OriginalCount; // caller doesn't know about the 2 synchronization events
           Exit;
         end;
       end
@@ -1153,7 +1148,7 @@ begin
         if Count > 0 then
         begin
           Index := Result - WAIT_OBJECT_0;
-          Move(Handles[Index + 1], Handles[Index], ((Count + 1) - Index) * SizeOf(THandle));
+          Move(Handles[Index + 1], Handles[Index], ((Count + 2) - Index) * SizeOf(THandle));
         end;
       end
       else
@@ -1172,10 +1167,10 @@ end;
 { ---------------------------------------------------------------------------- }
 
 function InternalAsyncMultiSync(const List: array of IAsyncCall; const Handles: array of THandle;
-  WaitAll: Boolean; Milliseconds: Cardinal; MsgWait: Boolean; dwWakeMask: DWORD): Integer;
+  WaitAll: Boolean; Milliseconds: Cardinal; MsgWait: Boolean; dwWakeMask: DWORD): Cardinal;
 
   function InternalWait(const List: array of IAsyncCall; const Handles: array of THandle;
-    WaitAll: Boolean; Milliseconds: Cardinal; MsgWait: Boolean; dwWakeMask: DWORD): Integer;
+    WaitAll: Boolean; Milliseconds: Cardinal; MsgWait: Boolean; dwWakeMask: DWORD): Cardinal;
   var
     WaitHandles: array of THandle;
     Mapping: array of Integer;
@@ -1248,13 +1243,13 @@ function InternalAsyncMultiSync(const List: array of IAsyncCall; const Handles: 
       else if (SignalState >= WAIT_ABANDONED_0) and (SignalState < WAIT_ABANDONED_0 + Count) then
         Result := WAIT_ABANDONED_0 + Mapping[SignalState - WAIT_ABANDONED_0] 
       else
-        Result := -1;
+        Result := WAIT_FAILED;
     end
     else
-      Result := 0;
+      Result := WAIT_OBJECT_0; // all AsyncCalls are already synchronized
   end;
 
-  function InternalWaitAllInfinite(const List: array of IAsyncCall; const Handles: array of THandle): Integer;
+  function InternalWaitAllInfinite(const List: array of IAsyncCall; const Handles: array of THandle): Cardinal;
   var
     I: Integer;
   begin
@@ -1270,11 +1265,14 @@ function InternalAsyncMultiSync(const List: array of IAsyncCall; const Handles: 
       else
         WaitForMultipleObjects(Length(Handles), @Handles[0], True, INFINITE);
     end;
-    Result := 0;
+    Result := WAIT_OBJECT_0;
   end;
 
+var
+  Count: Integer;
 begin
-  if Length(List) > 0 then
+  Count := Length(List) + Length(Handles);
+  if (Count > 0) and (Count <= MAXIMUM_ASYNC_WAIT_OBJECTS) then
   begin
     if WaitAll and (Milliseconds = INFINITE) and not MsgWait and (GetCurrentThreadId <> MainThreadId) then
       Result := InternalWaitAllInfinite(List, Handles)
@@ -1282,29 +1280,29 @@ begin
       Result := InternalWait(List, Handles, WaitAll, Milliseconds, MsgWait, dwWakeMask);
   end
   else
-    Result := 0;
+    Result := WAIT_FAILED;
 end;
 
 function AsyncMultiSync(const List: array of IAsyncCall; WaitAll: Boolean;
-  Milliseconds: Cardinal): Integer;
+  Milliseconds: Cardinal): Cardinal;
 begin
   Result := InternalAsyncMultiSync(List, [], WaitAll, Milliseconds, False, 0);
 end;
 
 function AsyncMultiSyncEx(const List: array of IAsyncCall; const Handles: array of THandle;
-  WaitAll: Boolean = True; Milliseconds: Cardinal = INFINITE): Integer;
+  WaitAll: Boolean = True; Milliseconds: Cardinal = INFINITE): Cardinal;
 begin
   Result := InternalAsyncMultiSync(List, Handles, WaitAll, Milliseconds, False, 0);
 end;
 
 function MsgAsyncMultiSync(const List: array of IAsyncCall; WaitAll: Boolean;
-  Milliseconds: Cardinal; dwWakeMask: DWORD): Integer;
+  Milliseconds: Cardinal; dwWakeMask: DWORD): Cardinal;
 begin
   Result := InternalAsyncMultiSync(List, [], WaitAll, Milliseconds, True, dwWakeMask);
 end;
 
 function MsgAsyncMultiSyncEx(const List: array of IAsyncCall; const Handles: array of THandle;
-  WaitAll: Boolean; Milliseconds: Cardinal; dwWakeMask: DWORD): Integer;
+  WaitAll: Boolean; Milliseconds: Cardinal; dwWakeMask: DWORD): Cardinal;
 begin
   Result := InternalAsyncMultiSync(List, Handles, WaitAll, Milliseconds, True, dwWakeMask);
 end;
