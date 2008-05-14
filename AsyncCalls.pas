@@ -1287,9 +1287,9 @@ function InternalAsyncMultiSync(const List: array of IAsyncCall; const Handles: 
       if {(SignalState >= WAIT_OBJECT_0) and} (SignalState < WAIT_OBJECT_0 + Count) then
         Result := WAIT_OBJECT_0 + Mapping[SignalState - WAIT_OBJECT_0]
       else if (SignalState >= WAIT_ABANDONED_0) and (SignalState < WAIT_ABANDONED_0 + Count) then
-        Result := WAIT_ABANDONED_0 + Mapping[SignalState - WAIT_ABANDONED_0] 
+        Result := WAIT_ABANDONED_0 + Mapping[SignalState - WAIT_ABANDONED_0]
       else
-        Result := WAIT_FAILED;
+        Result := SignalState;
     end
     else
       Result := WAIT_OBJECT_0; // all AsyncCalls are already synchronized
