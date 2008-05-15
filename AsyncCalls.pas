@@ -604,6 +604,7 @@ type
   public
     constructor Create;
     destructor Destroy; override;
+    function _Release: Integer; stdcall;
     function ExecuteAsync: TAsyncCall;
     function SyncInThisThreadIfPossible: Boolean;
 
@@ -1474,16 +1475,18 @@ var
   List: TList;
 begin
   List := FAsyncCalls.LockList;
-  if List.Count > 0 then
-  begin
-    { Get the "oldest" async call }
-    Result := List[0];
-    List.Delete(0);
-  end
-  else
-    Result := nil;
-  FAsyncCalls.UnlockList;
-
+  try
+    if List.Count > 0 then
+    begin
+      { Get the "oldest" async call }
+      Result := List[0];
+      List.Delete(0);
+    end
+    else
+      Result := nil;
+  finally
+    FAsyncCalls.UnlockList;
+  end;
   { Nothing to do, go sleeping... }
   if Result = nil then
     Thread.Suspend;
@@ -1495,11 +1498,14 @@ var
   Index: Integer;
 begin
   List := FAsyncCalls.LockList;
-  Index := List.IndexOf(Call);
-  Result := Index >= 0;
-  if Result then
-    List.Delete(Index);
-  FAsyncCalls.UnlockList;
+  try
+    Index := List.IndexOf(Call);
+    Result := Index >= 0;
+    if Result then
+      List.Delete(Index);
+  finally
+    FAsyncCalls.UnlockList;
+  end;
 end;
 
 procedure TThreadPool.AddAsyncCall(Call: TAsyncCall);
@@ -1514,20 +1520,23 @@ begin
 
   FreeThreadFound := False;
   List := FThreads.LockList;
-  for I := 0 to List.Count - 1 do
-  begin
-    if TAsyncCallThread(List[I]).Suspended then
+  try
+    for I := 0 to List.Count - 1 do
     begin
-      { Wake up the thread so it can execute the waiting async call. }
-      TAsyncCallThread(List[I]).Resume;
-      FreeThreadFound := True;
-      Break;
+      if TAsyncCallThread(List[I]).Suspended then
+      begin
+        { Wake up the thread so it can execute the waiting async call. }
+        TAsyncCallThread(List[I]).Resume;
+        FreeThreadFound := True;
+        Break;
+      end;
     end;
+    { All threads are busy, we need to allocate another thread if possible }
+    if not FreeThreadFound and (List.Count < MaxThreads) then
+      AllocThread;
+  finally
+    FThreads.UnlockList;
   end;
-  { All threads are busy, we need to allocate another thread if possible }
-  if not FreeThreadFound and (List.Count < MaxThreads) then
-    AllocThread;
-  FThreads.UnlockList;
 end;
 
 function TThreadPool.AllocThread: TAsyncCallThread;
@@ -1621,6 +1630,20 @@ begin
     end;
   end;
   inherited Destroy;
+end;
+
+function TAsyncCall._Release: Integer;
+begin
+  Result := InterlockedDecrement(FRefCount);
+  if Result = 0 then
+  begin
+    try
+      if FEvent <> 0 then
+        Sync;
+    finally
+      Destroy;
+    end;
+  end;
 end;
 
 function TAsyncCall.Finished: Boolean;
