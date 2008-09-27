@@ -52,6 +52,10 @@ interface
   {$IF CompilerVersion >= 18.0}
     {$DEFINE SUPPORTS_INLINE}
   {$IFEND}
+
+  {$IF CompilerVersion >= 20.0}
+    {$DEFINE DELPHI2009_UP}
+  {$IFEND}
 {$ENDIF}
 
 {$IFDEF DEBUG_ASYNCCALLS}
@@ -127,6 +131,18 @@ type
     procedure ForceDifferentThread;
   end;
 
+  { *** Internal interface. Do not use it *** }
+  IAsyncCallEx = interface
+    ['{A31D8EE4-17B6-4FC7-AC94-77887201EE56}']
+    function GetEvent: THandle;
+    function SyncInThisThreadIfPossible: Boolean;
+  end;
+
+  IAsyncRunnable = interface
+    ['{1A313BBD-0F89-43AD-8B57-BBA3205F4888}']
+    procedure AsyncRun;
+  end;
+
 
 { SetMaxAsyncCallThreads() controls how many threads can be used by the
   async call thread pool. The thread pool creates threads when they are needed.
@@ -181,6 +197,8 @@ function AsyncCall(Method: TAsyncCallArgWideStringEvent; const Arg: WideString):
 function AsyncCall(Method: TAsyncCallArgInterfaceEvent; const Arg: IInterface): IAsyncCall; overload;
 function AsyncCall(Method: TAsyncCallArgExtendedEvent; const Arg: Extended): IAsyncCall; overload;
 function AsyncCallVar(Method: TAsyncCallArgVariantEvent; const Arg: Variant): IAsyncCall; overload;
+
+function AsyncCall(Runnable: IAsyncRunnable): IAsyncCall; overload;
 
 procedure AsyncExec(Method: TNotifyEvent; Arg: TObject; IdleMsgMethod: TAsyncIdleMsgMethod);
 
@@ -344,7 +362,7 @@ function AsyncCall(Proc: TCdeclMethod; const Args: array of const): IAsyncCall; 
                       meight be executed in the current thread.
                       The return value is zero when all async calls have finished.
                       Otherwise it is -1.
-                      
+
     WaitAll = False : The function returns when at least one of the async calls
                       has finished. The return value is the list index of the
                       first finished async call. If there was a timeout, the
@@ -427,6 +445,198 @@ function MsgAsyncMultiSyncEx(const List: array of IAsyncCall; const Handles: arr
 }
 procedure EnterMainThread;
 procedure LeaveMainThread;
+
+
+type
+  { *** Internal class. Do not use it *** }
+  { TAsyncCall is the base class for all parameter based async call types }
+  TAsyncCall = class(TInterfacedObject, IAsyncCall, IAsyncCallEx)
+  private
+    FEvent: THandle;
+    FReturnValue: Integer;
+    FFinished: Boolean;
+    FFatalException: Exception;
+    FFatalErrorAddr: Pointer;
+    FForceDifferentThread: Boolean;
+    procedure InternExecuteAsyncCall;
+    procedure InternExecuteSyncCall;
+    procedure Quit(AReturnValue: Integer);
+  protected
+    { Decendants must implement this method. It is called  when the async call
+      should be executed. }
+    function ExecuteAsyncCall: Integer; virtual; abstract;
+  public
+    constructor Create;
+    destructor Destroy; override;
+    function _Release: Integer; stdcall;
+    function ExecuteAsync: TAsyncCall;
+    function SyncInThisThreadIfPossible: Boolean;
+
+    function GetEvent: Cardinal;
+
+    function Sync: Integer;
+    function Finished: Boolean;
+    function ReturnValue: Integer;
+    procedure ForceDifferentThread;
+  end;
+
+  { *** Internal class. Do not use it *** }
+  { TSyncCall is a fake IAsyncCall implementor. The async call was already
+    executed when the interface is returned. }
+  TSyncCall = class(TInterfacedObject, IAsyncCall)
+  private
+    FReturnValue: Integer;
+  public
+    constructor Create(AReturnValue: Integer);
+    function Sync: Integer;
+    function Finished: Boolean;
+    function ReturnValue: Integer;
+    procedure ForceDifferentThread;
+  end;
+
+{$IFDEF DELPHI2009_UP}
+type
+  { *** Helpher class *** }
+  TMultiArgProcCall<TProc, T1> = class(TAsyncCall)
+  private
+    FProc: TProc;
+    FArg1: T1;
+  public
+    constructor Create(AProc: TProc; const AArg1: T1);
+  end;
+
+  TMultiArgProcCall<TProc, T1, T2> = class(TMultiArgProcCall<TProc, T1>)
+  private
+    FArg2: T2;
+  public
+    constructor Create(AProc: TProc; const AArg1: T1; const AArg2: T2);
+  end;
+
+  TMultiArgProcCall<TProc, T1, T2, T3> = class(TMultiArgProcCall<TProc, T1, T2>)
+  private
+    FArg3: T3;
+  public
+    constructor Create(AProc: TProc; const AArg1: T1; const AArg2: T2; const AArg3: T3);
+  end;
+
+  TMultiArgProcCall<TProc, T1, T2, T3, T4> = class(TMultiArgProcCall<TProc, T1, T2, T3>)
+  private
+    FArg4: T4;
+  public
+    constructor Create(AProc: TProc; const AArg1: T1; const AArg2: T2; const AArg3: T3; const AArg4: T4);
+  end;
+
+
+  TAsyncCalls = class(TObject)
+  private
+    type
+      TAsyncCallArgGenericProc<T> = function(Arg: T): Integer;
+      TAsyncCallArgGenericProc<T1, T2> = function(Arg1: T1; Arg2: T2): Integer;
+      TAsyncCallArgGenericProc<T1, T2, T3> = function(Arg1: T1; Arg2: T2; Arg3: T3): Integer;
+      TAsyncCallArgGenericProc<T1, T2, T3, T4> = function(Arg1: T1; Arg2: T2; Arg3: T3; Arg4: T4): Integer;
+      TAsyncCallArgGenericMethod<T> = function(Arg: T): Integer of object;
+      TAsyncCallArgGenericMethod<T1, T2> = function(Arg1: T1; Arg2: T2): Integer of object;
+      TAsyncCallArgGenericMethod<T1, T2, T3> = function(Arg1: T1; Arg2: T2; Arg3: T3): Integer of object;
+      TAsyncCallArgGenericMethod<T1, T2, T3, T4> = function(Arg1: T1; Arg2: T2; Arg3: T3; Arg4: T4): Integer of object;
+      TIntFunc = reference to function: Integer;
+
+      TAsyncCallArg<T> = class(TMultiArgProcCall<TAsyncCallArgGenericProc<T>, T>)
+      protected
+        function ExecuteAsyncCall: Integer; override;
+      end;
+
+      TAsyncCallArg<T1, T2> = class(TMultiArgProcCall<TAsyncCallArgGenericProc<T1, T2>, T1, T2>)
+      protected
+        function ExecuteAsyncCall: Integer; override;
+      end;
+
+      TAsyncCallArg<T1, T2, T3> = class(TMultiArgProcCall<TAsyncCallArgGenericProc<T1, T2, T3>, T1, T2, T3>)
+      protected
+        function ExecuteAsyncCall: Integer; override;
+      end;
+
+      TAsyncCallArg<T1, T2, T3, T4> = class(TMultiArgProcCall<TAsyncCallArgGenericProc<T1, T2, T3, T4>, T1, T2, T3, T4>)
+      protected
+        function ExecuteAsyncCall: Integer; override;
+      end;
+
+      TAsyncCallArgMethod<T> = class(TMultiArgProcCall<TAsyncCallArgGenericMethod<T>, T>)
+      protected
+        function ExecuteAsyncCall: Integer; override;
+      end;
+
+      TAsyncCallArgMethod<T1, T2> = class(TMultiArgProcCall<TAsyncCallArgGenericMethod<T1, T2>, T1, T2>)
+      protected
+        function ExecuteAsyncCall: Integer; override;
+      end;
+
+      TAsyncCallArgMethod<T1, T2, T3> = class(TMultiArgProcCall<TAsyncCallArgGenericMethod<T1, T2, T3>, T1, T2, T3>)
+      protected
+        function ExecuteAsyncCall: Integer; override;
+      end;
+
+      TAsyncCallArgMethod<T1, T2, T3, T4> = class(TMultiArgProcCall<TAsyncCallArgGenericMethod<T1, T2, T3, T4>, T1, T2, T3, T4>)
+      protected
+        function ExecuteAsyncCall: Integer; override;
+      end;
+
+      TAsyncCallAnonymProc = class(TAsyncCall)
+      private
+        FProc: TProc;
+      protected
+        function ExecuteAsyncCall: Integer; override;
+      public
+        constructor Create(AProc: TProc);
+      end;
+
+      TAsyncCallAnonymFunc = class(TAsyncCall)
+      private
+        FProc: TIntFunc;
+      protected
+        function ExecuteAsyncCall: Integer; override;
+      public
+        constructor Create(AProc: TIntFunc);
+      end;
+
+      TAsyncVclCallAnonymProc = class(TAsyncCall)
+      private
+        FProc: TProc;
+      protected
+        function ExecuteAsyncCall: Integer; override;
+      public
+        constructor Create(AProc: TProc);
+      end;
+
+  public
+    { Invoke an asynchronous function call }
+    class function Invoke<T>(Proc: TAsyncCallArgGenericProc<T>; const Arg: T): IAsyncCall; overload; static;
+    class function Invoke<T>(Event: TAsyncCallArgGenericMethod<T>; const Arg: T): IAsyncCall; overload; static;
+    class function Invoke<T1, T2>(Proc: TAsyncCallArgGenericProc<T1, T2>; const Arg1: T1; const Arg2: T2): IAsyncCall; overload; static;
+    class function Invoke<T1, T2>(Event: TAsyncCallArgGenericMethod<T1, T2>; const Arg1: T1; const Arg2: T2): IAsyncCall; overload; static;
+    class function Invoke<T1, T2, T3>(Proc: TAsyncCallArgGenericProc<T1, T2, T3>; const Arg1: T1; const Arg2: T2; const Arg3: T3): IAsyncCall; overload; static;
+    class function Invoke<T1, T2, T3>(Event: TAsyncCallArgGenericMethod<T1, T2, T3>; const Arg1: T1; const Arg2: T2; const Arg3: T3): IAsyncCall; overload; static;
+    class function Invoke<T1, T2, T3, T4>(Proc: TAsyncCallArgGenericProc<T1, T2, T3, T4>; const Arg1: T1; const Arg2: T2; const Arg3: T3; const Arg4: T4): IAsyncCall; overload; static;
+    class function Invoke<T1, T2, T3, T4>(Event: TAsyncCallArgGenericMethod<T1, T2, T3, T4>; const Arg1: T1; const Arg2: T2; const Arg3: T3; const Arg4: T4): IAsyncCall; overload; static;
+
+    { Invoke an asynchronouse anonymous method call }
+    class function Invoke(Func: TIntFunc): IAsyncCall; overload; static;
+    class function Invoke(Proc: TProc): IAsyncCall; overload; static;
+
+    { MsgExec waits for the @AsyncCall to finish. If there are any messages in
+      the message queue and the function was called from the main thread, it will
+      call @IdleMsgMethod. "Application.ProcessMessages" can be specified for
+      @IdleMsgMethod. }
+    //class procedure MsgExec(AsyncCall: IAsyncCall; IdleMsgMethod: TAsyncIdleMsgMethod); static;
+
+    { Synchronize with the VCL }
+
+    { VCLSync returns when the anonymous method was called in the main thread }
+    class procedure VCLSync(Proc: TProc); static;
+    { VCLInvoke return immediately. The anonymous method will be executed in
+      the main thread. }
+    class function VCLInvoke(Proc: TProc): IAsyncCall; static;
+  end;
+{$ENDIF DELPHI2009_UP}
 
 implementation
 
@@ -527,14 +737,6 @@ end;
 {$ENDIF DELPHI6}
 
 type
-  TAsyncCall = class;
-
-  IAsyncCallEx = interface
-    ['{A31D8EE4-17B6-4FC7-AC94-77887201EE56}']
-    function GetEvent: THandle;
-    function SyncInThisThreadIfPossible: Boolean;
-  end;
-
   { TAsyncCallThread is a pooled thread. It looks itself for work. }
   TAsyncCallThread = class(TThread)
   protected
@@ -570,50 +772,6 @@ type
     property MaxThreads: Integer read FMaxThreads;
     property NumberOfProcessors: Cardinal read FNumberOfProcessors;
     property MainThreadSyncEvent: THandle read FMainThreadSyncEvent;
-  end;
-
-  { TSyncCall is a fake IAsyncCall implementor. The async call was already
-    executed when the interface is returned. }
-  TSyncCall = class(TInterfacedObject, IAsyncCall)
-  private
-    FReturnValue: Integer;
-  public
-    constructor Create(AReturnValue: Integer);
-    function Sync: Integer;
-    function Finished: Boolean;
-    function ReturnValue: Integer;
-    procedure ForceDifferentThread;
-  end;
-
-  { TAsyncCall is the base class for all parameter based async call types }
-  TAsyncCall = class(TInterfacedObject, IAsyncCall, IAsyncCallEx)
-  private
-    FEvent: THandle;
-    FReturnValue: Integer;
-    FFinished: Boolean;
-    FFatalException: Exception;
-    FFatalErrorAddr: Pointer;
-    FForceDifferentThread: Boolean;
-    procedure InternExecuteAsyncCall;
-    procedure InternExecuteSyncCall;
-    procedure Quit(AReturnValue: Integer);
-  protected
-    { Decendants must implement this method. It is called  when the async call
-      should be executed. }
-    function ExecuteAsyncCall: Integer; virtual; abstract;
-  public
-    constructor Create;
-    destructor Destroy; override;
-    function _Release: Integer; stdcall;
-    function ExecuteAsync: TAsyncCall;
-    function SyncInThisThreadIfPossible: Boolean;
-
-    function GetEvent: Cardinal;
-
-    function Sync: Integer;
-    function Finished: Boolean;
-    function ReturnValue: Integer;
-    procedure ForceDifferentThread;
   end;
 
 { ---------------------------------------------------------------------------- }
@@ -828,7 +986,7 @@ end;
 
 function AsyncCall(Proc: TAsyncCallArgObjectProc; Arg: TObject): IAsyncCall;
 begin
-  { Execute the function synchron when no thread pool exists }
+  { Execute the function synchron if no thread pool exists }
   if ThreadPool.MaxThreads = 0 then
     Result := TSyncCall.Create(Proc(Arg))
   else
@@ -842,7 +1000,7 @@ end;
 
 function AsyncCall(Proc: TAsyncCallArgStringProc; const Arg: AnsiString): IAsyncCall;
 begin
-  { Execute the function synchron when no thread pool exists }
+  { Execute the function synchron if no thread pool exists }
   if ThreadPool.MaxThreads = 0 then
     Result := TSyncCall.Create(Proc(Arg))
   else
@@ -851,7 +1009,7 @@ end;
 
 function AsyncCall(Proc: TAsyncCallArgWideStringProc; const Arg: WideString): IAsyncCall;
 begin
-  { Execute the function synchron when no thread pool exists }
+  { Execute the function synchron if no thread pool exists }
   if ThreadPool.MaxThreads = 0 then
     Result := TSyncCall.Create(Proc(Arg))
   else
@@ -860,7 +1018,7 @@ end;
 
 function AsyncCall(Proc: TAsyncCallArgInterfaceProc; const Arg: IInterface): IAsyncCall;
 begin
-  { Execute the function synchron when no thread pool exists }
+  { Execute the function synchron if no thread pool exists }
   if ThreadPool.MaxThreads = 0 then
     Result := TSyncCall.Create(Proc(Arg))
   else
@@ -869,7 +1027,7 @@ end;
 
 function AsyncCall(Proc: TAsyncCallArgExtendedProc; const Arg: Extended): IAsyncCall;
 begin
-  { Execute the function synchron when no thread pool exists }
+  { Execute the function synchron if no thread pool exists }
   if ThreadPool.MaxThreads = 0 then
     Result := TSyncCall.Create(Proc(Arg))
   else
@@ -878,7 +1036,7 @@ end;
 
 function AsyncCallVar(Proc: TAsyncCallArgVariantProc; const Arg: Variant): IAsyncCall;
 begin
-  { Execute the function synchron when no thread pool exists }
+  { Execute the function synchron if no thread pool exists }
   if ThreadPool.MaxThreads = 0 then
     Result := TSyncCall.Create(Proc(Arg))
   else
@@ -889,7 +1047,7 @@ end;
 
 function AsyncCall(Method: TAsyncCallArgObjectMethod; Arg: TObject): IAsyncCall;
 begin
-  { Execute the function synchron when no thread pool exists }
+  { Execute the function synchron if no thread pool exists }
   if ThreadPool.MaxThreads = 0 then
     Result := TSyncCall.Create(Method(Arg))
   else
@@ -903,7 +1061,7 @@ end;
 
 function AsyncCall(Method: TAsyncCallArgStringMethod; const Arg: AnsiString): IAsyncCall;
 begin
-  { Execute the function synchron when no thread pool exists }
+  { Execute the function synchron if no thread pool exists }
   if ThreadPool.MaxThreads = 0 then
     Result := TSyncCall.Create(Method(Arg))
   else
@@ -912,7 +1070,7 @@ end;
 
 function AsyncCall(Method: TAsyncCallArgWideStringMethod; const Arg: WideString): IAsyncCall;
 begin
-  { Execute the function synchron when no thread pool exists }
+  { Execute the function synchron if no thread pool exists }
   if ThreadPool.MaxThreads = 0 then
     Result := TSyncCall.Create(Method(Arg))
   else
@@ -921,7 +1079,7 @@ end;
 
 function AsyncCall(Method: TAsyncCallArgInterfaceMethod; const Arg: IInterface): IAsyncCall;
 begin
-  { Execute the function synchron when no thread pool exists }
+  { Execute the function synchron if no thread pool exists }
   if ThreadPool.MaxThreads = 0 then
     Result := TSyncCall.Create(Method(Arg))
   else
@@ -930,7 +1088,7 @@ end;
 
 function AsyncCall(Method: TAsyncCallArgExtendedMethod; const Arg: Extended): IAsyncCall;
 begin
-  { Execute the function synchron when no thread pool exists }
+  { Execute the function synchron if no thread pool exists }
   if ThreadPool.MaxThreads = 0 then
     Result := TSyncCall.Create(Method(Arg))
   else
@@ -939,7 +1097,7 @@ end;
 
 function AsyncCallVar(Method: TAsyncCallArgVariantMethod; const Arg: Variant): IAsyncCall;
 begin
-  { Execute the function synchron when no thread pool exists }
+  { Execute the function synchron if no thread pool exists }
   if ThreadPool.MaxThreads = 0 then
     Result := TSyncCall.Create(Method(Arg))
   else
@@ -983,6 +1141,17 @@ begin
   Result := AsyncCallVar(TAsyncCallArgVariantMethod(Method), Arg);
 end;
 
+function AsyncCallRunnable(const Arg: IInterface): Integer;
+begin
+  IAsyncRunnable(Arg).AsyncRun;
+  Result := 0;
+end;
+
+function AsyncCall(Runnable: IAsyncRunnable): IAsyncCall;
+begin
+  Result := AsyncCall(AsyncCallRunnable, IInterface(Runnable));
+end;
+
 { ---------------------------------------------------------------------------- }
 
 procedure AsyncExec(Method: TNotifyEvent; Arg: TObject; IdleMsgMethod: TAsyncIdleMsgMethod);
@@ -994,7 +1163,7 @@ begin
   begin
     Handle.ForceDifferentThread;
     IdleMsgMethod;
-    while MsgAsyncMultiSync([Handle], False, INFINITE, QS_ALLINPUT) = 1 do
+    while MsgAsyncMultiSync([Handle], False, INFINITE, QS_ALLINPUT or QS_ALLPOSTMESSAGE) = 1 do
       IdleMsgMethod;
   end;
 end;
@@ -1033,7 +1202,7 @@ begin
   begin
     Handle.ForceDifferentThread;
     IdleMsgMethod;
-    while MsgAsyncMultiSync([Handle], False, INFINITE, QS_ALLINPUT) = 1 do
+    while MsgAsyncMultiSync([Handle], False, INFINITE, QS_ALLINPUT or QS_ALLPOSTMESSAGE) = 1 do
       IdleMsgMethod;
   end;
 end;
@@ -2559,6 +2728,288 @@ asm
   inc [MainThreadContext].TMainThreadContext.MainThreadOpenBlockCount
 end;
 
+{----------------------------------------------------------------------------}
+
+{$IFDEF DELPHI2009_UP}
+
+{ TMultiArgProcCall<TProc, T1> }
+constructor TMultiArgProcCall<TProc, T1>.Create(AProc: TProc; const AArg1: T1);
+begin
+  inherited Create;
+  FProc := AProc;
+  FArg1 := AArg1;
+end;
+
+{ TMultiArgProcCall<TProc, T1, T2> }
+constructor TMultiArgProcCall<TProc, T1, T2>.Create(AProc: TProc; const AArg1: T1; const AArg2: T2);
+begin
+  inherited Create(AProc, AArg1);
+  FArg2 := AArg2;
+end;
+
+{ TMultiArgProcCall<TProc, T1, T2, T3> }
+constructor TMultiArgProcCall<TProc, T1, T2, T3>.Create(AProc: TProc; const AArg1: T1; const AArg2: T2; const AArg3: T3);
+begin
+  inherited Create(AProc, AArg1, AArg2);
+  FArg3 := AArg3;
+end;
+
+{ TMultiArgProcCall<TProc, T1, T2, T3, T4> }
+constructor TMultiArgProcCall<TProc, T1, T2, T3, T4>.Create(AProc: TProc; const AArg1: T1; const AArg2: T2; const AArg3: T3; const AArg4: T4);
+begin
+  inherited Create(AProc, AArg1, AArg2, AArg3);
+  FArg4 := AArg4;
+end;
+
+{ TAsyncVclCallAnonymProc }
+
+constructor TAsyncCalls.TAsyncVclCallAnonymProc.Create(AProc: TProc);
+begin
+  inherited Create;
+  FProc := AProc;
+end;
+
+function TAsyncCalls.TAsyncVclCallAnonymProc.ExecuteAsyncCall: Integer;
+begin
+  FProc();
+  Result := 0;
+end;
+
+{ TAsyncCalls.TAsyncCallArg<T> }
+
+function TAsyncCalls.TAsyncCallArg<T>.ExecuteAsyncCall: Integer;
+begin
+  Result := FProc(FArg1);
+end;
+
+{ TAsyncCalls.TAsyncCallArg<T1, T2> }
+
+function TAsyncCalls.TAsyncCallArg<T1, T2>.ExecuteAsyncCall: Integer;
+begin
+  Result := FProc(FArg1, FArg2);
+end;
+
+{ TAsyncCalls.TAsyncCallArg<T1, T2, T3> }
+
+function TAsyncCalls.TAsyncCallArg<T1, T2, T3>.ExecuteAsyncCall: Integer;
+begin
+  Result := FProc(FArg1, FArg2, FArg3);
+end;
+
+{ TAsyncCalls.TAsyncCallArg<T1, T2, T3, T4> }
+
+function TAsyncCalls.TAsyncCallArg<T1, T2, T3, T4>.ExecuteAsyncCall: Integer;
+begin
+  Result := FProc(FArg1, FArg2, FArg3, FArg4);
+end;
+
+{ TAsyncCalls.TAsyncCallArgMethod<T> }
+
+function TAsyncCalls.TAsyncCallArgMethod<T>.ExecuteAsyncCall: Integer;
+begin
+  Result := FProc(FArg1);
+end;
+
+{ TAsyncCalls.TAsyncCallArgMethod<T1, T2> }
+
+function TAsyncCalls.TAsyncCallArgMethod<T1, T2>.ExecuteAsyncCall: Integer;
+begin
+  Result := FProc(FArg1, FArg2);
+end;
+
+{ TAsyncCalls.TAsyncCallArgMethod<T1, T2, T3> }
+
+function TAsyncCalls.TAsyncCallArgMethod<T1, T2, T3>.ExecuteAsyncCall: Integer;
+begin
+  Result := FProc(FArg1, FArg2, FArg3);
+end;
+
+{ TAsyncCalls.TAsyncCallArgMethod<T1, T2, T3, T4> }
+
+function TAsyncCalls.TAsyncCallArgMethod<T1, T2, T3, T4>.ExecuteAsyncCall: Integer;
+begin
+  Result := FProc(FArg1, FArg2, FArg3, FArg4);
+end;
+
+{ TAsyncCalls.TAsyncCallAnonymProc }
+
+constructor TAsyncCalls.TAsyncCallAnonymProc.Create(AProc: TProc);
+begin
+  inherited Create;
+  FProc := AProc;
+end;
+
+function TAsyncCalls.TAsyncCallAnonymProc.ExecuteAsyncCall: Integer;
+begin
+  FProc;
+  Result := 0;
+end;
+
+{ TAsyncCalls.TAsyncCallAnonymFunc }
+
+constructor TAsyncCalls.TAsyncCallAnonymFunc.Create(AProc: TIntFunc);
+begin
+  inherited Create;
+  FProc := AProc;
+end;
+
+function TAsyncCalls.TAsyncCallAnonymFunc.ExecuteAsyncCall: Integer;
+begin
+  Result := FProc();
+end;
+
+{ TAsyncCalls<T> }
+
+class function TAsyncCalls.Invoke<T>(Proc: TAsyncCallArgGenericProc<T>; const Arg: T): IAsyncCall;
+begin
+  { Execute the function synchron if no thread pool exists }
+  if GetMaxAsyncCallThreads = 0 then
+    Result := TSyncCall.Create(Proc(Arg))
+  else
+    Result := TAsyncCallArg<T>.Create(Proc, Arg).ExecuteAsync;
+end;
+
+class function TAsyncCalls.Invoke<T>(Event: TAsyncCallArgGenericMethod<T>; const Arg: T): IAsyncCall;
+begin
+  { Execute the function synchron if no thread pool exists }
+  if GetMaxAsyncCallThreads = 0 then
+    Result := TSyncCall.Create(Event(Arg))
+  else
+    Result := TAsyncCallArgMethod<T>.Create(Event, Arg).ExecuteAsync;
+end;
+
+class function TAsyncCalls.Invoke<T1, T2>(Proc: TAsyncCallArgGenericProc<T1, T2>; const Arg1: T1; const Arg2: T2): IAsyncCall;
+begin
+  { Execute the function synchron if no thread pool exists }
+  if GetMaxAsyncCallThreads = 0 then
+    Result := TSyncCall.Create(Proc(Arg1, Arg2))
+  else
+    Result := TAsyncCallArg<T1, T2>.Create(Proc, Arg1, Arg2).ExecuteAsync;
+end;
+
+class function TAsyncCalls.Invoke<T1, T2>(Event: TAsyncCallArgGenericMethod<T1, T2>; const Arg1: T1; const Arg2: T2): IAsyncCall;
+begin
+  { Execute the function synchron if no thread pool exists }
+  if GetMaxAsyncCallThreads = 0 then
+    Result := TSyncCall.Create(Event(Arg1, Arg2))
+  else
+    Result := TAsyncCallArgMethod<T1, T2>.Create(Event, Arg1, Arg2).ExecuteAsync;
+end;
+
+class function TAsyncCalls.Invoke<T1, T2, T3>(Proc: TAsyncCallArgGenericProc<T1, T2, T3>; const Arg1: T1; const Arg2: T2; const Arg3: T3): IAsyncCall;
+begin
+  { Execute the function synchron if no thread pool exists }
+  if GetMaxAsyncCallThreads = 0 then
+    Result := TSyncCall.Create(Proc(Arg1, Arg2, Arg3))
+  else
+    Result := TAsyncCallArg<T1, T2, T3>.Create(Proc, Arg1, Arg2, Arg3).ExecuteAsync;
+end;
+
+class function TAsyncCalls.Invoke<T1, T2, T3>(Event: TAsyncCallArgGenericMethod<T1, T2, T3>; const Arg1: T1; const Arg2: T2; const Arg3: T3): IAsyncCall;
+begin
+  { Execute the function synchron if no thread pool exists }
+  if GetMaxAsyncCallThreads = 0 then
+    Result := TSyncCall.Create(Event(Arg1, Arg2, Arg3))
+  else
+    Result := TAsyncCallArgMethod<T1, T2, T3>.Create(Event, Arg1, Arg2, Arg3).ExecuteAsync;
+end;
+
+class function TAsyncCalls.Invoke<T1, T2, T3, T4>(Proc: TAsyncCallArgGenericProc<T1, T2, T3, T4>; const Arg1: T1; const Arg2: T2; const Arg3: T3; const Arg4: T4): IAsyncCall;
+begin
+  { Execute the function synchron if no thread pool exists }
+  if GetMaxAsyncCallThreads = 0 then
+    Result := TSyncCall.Create(Proc(Arg1, Arg2, Arg3, Arg4))
+  else
+    Result := TAsyncCallArg<T1, T2, T3, T4>.Create(Proc, Arg1, Arg2, Arg3, Arg4).ExecuteAsync;
+end;
+
+class function TAsyncCalls.Invoke<T1, T2, T3, T4>(Event: TAsyncCallArgGenericMethod<T1, T2, T3, T4>; const Arg1: T1; const Arg2: T2; const Arg3: T3; const Arg4: T4): IAsyncCall;
+begin
+  { Execute the function synchron if no thread pool exists }
+  if GetMaxAsyncCallThreads = 0 then
+    Result := TSyncCall.Create(Event(Arg1, Arg2, Arg3, Arg4))
+  else
+    Result := TAsyncCallArgMethod<T1, T2, T3, T4>.Create(Event, Arg1, Arg2, Arg3, Arg4).ExecuteAsync;
+end;
+
+
+class function TAsyncCalls.Invoke(Func: TIntFunc): IAsyncCall;
+begin
+  { Execute the function synchron if no thread pool exists }
+  if GetMaxAsyncCallThreads = 0 then
+    Result := TSyncCall.Create(Func())
+  else
+    Result := TAsyncCallAnonymFunc.Create(Func).ExecuteAsync;
+end;
+
+class function TAsyncCalls.Invoke(Proc: TProc): IAsyncCall;
+begin
+  { Execute the function synchron if no thread pool exists }
+  if GetMaxAsyncCallThreads = 0 then
+  begin
+    Proc();
+    Result := TSyncCall.Create(0);
+  end
+  else
+    Result := TAsyncCallAnonymProc.Create(Proc).ExecuteAsync;
+end;
+
+class procedure TAsyncCalls.VCLSync(Proc: TProc);
+
+  procedure Exec(var P: TProc);
+  begin
+    P();
+  end;
+
+var
+  M: TMethod;
+begin
+  if GetCurrentThreadId = MainThreadID then
+    Proc()
+  else
+  begin
+    M.Code := @Exec;
+    M.Data := @Proc;
+    TThread.StaticSynchronize(nil, TThreadMethod(M));
+  end;
+end;
+
+class function TAsyncCalls.VCLInvoke(Proc: TProc): IAsyncCall;
+var
+  Call: TAsyncVclCallAnonymProc;
+begin
+  if GetCurrentThreadId = MainThreadID then
+  begin
+    Proc();
+    Result := TSyncCall.Create(0);
+  end
+  else
+  begin
+    Call := TAsyncVclCallAnonymProc.Create(Proc);
+    ThreadPool.SendVclSync(Call);
+    Result := Call;
+  end;
+end;
+
+{class procedure TAsyncCalls.MsgExec(AsyncCall: IAsyncCall; IdleMsgMethod: TAsyncIdleMsgMethod);
+begin
+  if GetCurrentThreadId = MainThreadID then
+  begin
+    if Assigned(IdleMsgMethod) then
+    begin
+      AsyncCall.ForceDifferentThread;
+      IdleMsgMethod;
+      while MsgAsyncMultiSync([AsyncCall], False, INFINITE, QS_ALLINPUT or QS_ALLPOSTMESSAGE) = 1 do
+        IdleMsgMethod;
+    end;
+  end
+  else
+    AsyncCall.Sync;
+end;}
+
+{$ENDIF DELPHI2009_UP}
+
+{----------------------------------------------------------------------------}
 
 initialization
   ThreadPool := TThreadPool.Create;
