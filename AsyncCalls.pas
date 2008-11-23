@@ -495,7 +495,6 @@ type
   end;
 
 {$IFDEF DELPHI2009_UP}
-(*
 type
   { *** Helpher class *** }
   TMultiArgProcCall<TProc, T1> = class(TAsyncCall)
@@ -526,12 +525,11 @@ type
   public
     constructor Create(AProc: TProc; const AArg1: T1; const AArg2: T2; const AArg3: T3; const AArg4: T4);
   end;
-*)
 
   TAsyncCalls = class(TObject)
   private
     type
-(*      TAsyncCallArgGenericProc<T> = function(Arg: T): Integer;
+      TAsyncCallArgGenericProc<T> = function(Arg: T): Integer;
       TAsyncCallArgGenericProc<T1, T2> = function(Arg1: T1; Arg2: T2): Integer;
       TAsyncCallArgGenericProc<T1, T2, T3> = function(Arg1: T1; Arg2: T2; Arg3: T3): Integer;
       TAsyncCallArgGenericProc<T1, T2, T3, T4> = function(Arg1: T1; Arg2: T2; Arg3: T3; Arg4: T4): Integer;
@@ -579,8 +577,7 @@ type
       TAsyncCallArgMethod<T1, T2, T3, T4> = class(TMultiArgProcCall<TAsyncCallArgGenericMethod<T1, T2, T3, T4>, T1, T2, T3, T4>)
       protected
         function ExecuteAsyncCall: Integer; override;
-      end;*)
-      TIntFunc = reference to function: Integer;
+      end;
 
       TAsyncCallAnonymProc = class(TAsyncCall)
       private
@@ -611,14 +608,14 @@ type
 
   public
     { Invoke an asynchronous function call }
-(*    class function Invoke<T>(Proc: TAsyncCallArgGenericProc<T>; const Arg: T): IAsyncCall; overload; static;
+    class function Invoke<T>(Proc: TAsyncCallArgGenericProc<T>; const Arg: T): IAsyncCall; overload; static;
     class function Invoke<T>(Event: TAsyncCallArgGenericMethod<T>; const Arg: T): IAsyncCall; overload; static;
     class function Invoke<T1, T2>(Proc: TAsyncCallArgGenericProc<T1, T2>; const Arg1: T1; const Arg2: T2): IAsyncCall; overload; static;
     class function Invoke<T1, T2>(Event: TAsyncCallArgGenericMethod<T1, T2>; const Arg1: T1; const Arg2: T2): IAsyncCall; overload; static;
     class function Invoke<T1, T2, T3>(Proc: TAsyncCallArgGenericProc<T1, T2, T3>; const Arg1: T1; const Arg2: T2; const Arg3: T3): IAsyncCall; overload; static;
     class function Invoke<T1, T2, T3>(Event: TAsyncCallArgGenericMethod<T1, T2, T3>; const Arg1: T1; const Arg2: T2; const Arg3: T3): IAsyncCall; overload; static;
     class function Invoke<T1, T2, T3, T4>(Proc: TAsyncCallArgGenericProc<T1, T2, T3, T4>; const Arg1: T1; const Arg2: T2; const Arg3: T3; const Arg4: T4): IAsyncCall; overload; static;
-    class function Invoke<T1, T2, T3, T4>(Event: TAsyncCallArgGenericMethod<T1, T2, T3, T4>; const Arg1: T1; const Arg2: T2; const Arg3: T3; const Arg4: T4): IAsyncCall; overload; static;*)
+    class function Invoke<T1, T2, T3, T4>(Event: TAsyncCallArgGenericMethod<T1, T2, T3, T4>; const Arg1: T1; const Arg2: T2; const Arg3: T3; const Arg4: T4): IAsyncCall; overload; static;
 
     { Invoke an asynchronouse anonymous method call }
     class function Invoke(Func: TIntFunc): IAsyncCall; overload; static;
@@ -2733,7 +2730,6 @@ end;
 {----------------------------------------------------------------------------}
 
 {$IFDEF DELPHI2009_UP}
-(*
 { TMultiArgProcCall<TProc, T1> }
 constructor TMultiArgProcCall<TProc, T1>.Create(AProc: TProc; const AArg1: T1);
 begin
@@ -2762,7 +2758,7 @@ begin
   inherited Create(AProc, AArg1, AArg2, AArg3);
   FArg4 := AArg4;
 end;
-*)
+
 { TAsyncVclCallAnonymProc }
 
 constructor TAsyncCalls.TAsyncVclCallAnonymProc.Create(AProc: TProc);
@@ -2776,7 +2772,7 @@ begin
   FProc();
   Result := 0;
 end;
-(*
+
 { TAsyncCalls.TAsyncCallArg<T> }
 
 function TAsyncCalls.TAsyncCallArg<T>.ExecuteAsyncCall: Integer;
@@ -2832,7 +2828,7 @@ function TAsyncCalls.TAsyncCallArgMethod<T1, T2, T3, T4>.ExecuteAsyncCall: Integ
 begin
   Result := FProc(FArg1, FArg2, FArg3, FArg4);
 end;
-*)
+
 { TAsyncCalls.TAsyncCallAnonymProc }
 
 constructor TAsyncCalls.TAsyncCallAnonymProc.Create(AProc: TProc);
@@ -2861,7 +2857,7 @@ begin
 end;
 
 { TAsyncCalls<T> }
-(*
+
 class function TAsyncCalls.Invoke<T>(Proc: TAsyncCallArgGenericProc<T>; const Arg: T): IAsyncCall;
 begin
   { Execute the function synchron if no thread pool exists }
@@ -2933,7 +2929,6 @@ begin
   else
     Result := TAsyncCallArgMethod<T1, T2, T3, T4>.Create(Event, Arg1, Arg2, Arg3, Arg4).ExecuteAsync;
 end;
-*)
 
 class function TAsyncCalls.Invoke(Func: TIntFunc): IAsyncCall;
 begin
