@@ -686,6 +686,15 @@ begin
 end;
 {$ENDIF ~DELPHI7_UP}
 
+procedure StaticSynchronize(AMethod: TThreadMethod);
+begin
+  {$IF CompilerVersion >= 21.0}
+  TThread.Synchronize(nil, AMethod);
+  {$ELSE}
+  TThread.StaticSynchronize(nil, AMethod);
+  {$IFEND}
+end;
+
 {$IFDEF DELPHI5}
 function CheckSynchronize(Timeout: Integer = 0): Boolean;
 begin
@@ -739,9 +748,14 @@ type
   { TAsyncCallThread is a pooled thread. It looks itself for work. }
   TAsyncCallThread = class(TThread)
   protected
+    FSuspended: Boolean;
     procedure Execute; override;
   public
     procedure ForceTerminate;
+    procedure SuspendThread;
+    procedure ResumeThread;
+
+    property Suspended: Boolean read FSuspended;
   end;
 
   { TThreadPool contains a pool of threads that are either suspended or busy. }
@@ -1578,23 +1592,22 @@ begin
   if Suspended then
   begin
     Terminate;
-    { Do not call Self.Resume() here because it can lead to memory corruption.
-
-        procedure TThread.Resume;
-        var
-          SuspendCount: Integer;
-        begin
-          SuspendCount := ResumeThread(FHandle);
-          => Thread could be destroyed by FreeOnTerminate <=
-          CheckThreadError(SuspendCount >= 0);
-          if SuspendCount = 1 then
-            FSuspended := False; => accesses the destroyed thread
-        end;
-     }
-    ResumeThread(Handle);
+    ResumeThread;
   end
   else
     Terminate;
+end;
+
+procedure TAsyncCallThread.ResumeThread;
+begin
+  FSuspended := False;
+  Windows.ResumeThread(Handle);
+end;
+
+procedure TAsyncCallThread.SuspendThread;
+begin
+  FSuspended := True;
+  Windows.SuspendThread(Handle);
 end;
 
 { ---------------------------------------------------------------------------- }
@@ -1657,7 +1670,7 @@ begin
   end;
   { Nothing to do, go sleeping... }
   if Result = nil then
-    Thread.Suspend;
+    Thread.SuspendThread;
 end;
 
 function TThreadPool.RemoveAsyncCall(Call: TAsyncCall): Boolean;
@@ -1694,7 +1707,7 @@ begin
       if TAsyncCallThread(List[I]).Suspended then
       begin
         { Wake up the thread so it can execute the waiting async call. }
-        TAsyncCallThread(List[I]).Resume;
+        TAsyncCallThread(List[I]).ResumeThread;
         FreeThreadFound := True;
         Break;
       end;
@@ -1712,7 +1725,11 @@ begin
   Result := TAsyncCallThread.Create(True);
   Result.FreeOnTerminate := True;
   FThreads.Add(Result);
+  {$IF CompilerVersion >= 21.0}
+  Result.Start;
+  {$ELSE}
   Result.Resume;
+  {$IFEND}
 end;
 
 const
@@ -2406,7 +2423,7 @@ begin
   begin
     M.Code := @LocalVclCallProc;
     M.Data := @Data;
-    TThread.StaticSynchronize(nil, TThreadMethod(M));
+    StaticSynchronize(TThreadMethod(M));
   end;
 end;
 
@@ -2661,13 +2678,12 @@ asm
   push dword ptr fs:[eax]
   mov fs:[eax], esp
 
-  { Call Synchronize(nil, TMethod(ExecuteInMainThread)) }
-  //xor eax, eax // ClassType isn't used in StaticSynchronize/Synchronize
+  { Call Synchronize(TMethod(ExecuteInMainThread)) }
   xor edx, edx
   push edx
   mov ecx, OFFSET ExecuteInMainThread
   push ecx
-  call TThread.StaticSynchronize
+  call StaticSynchronize
 
   { Clean up try/finally }
   xor eax,eax
@@ -2967,7 +2983,7 @@ begin
   begin
     M.Code := @Exec;
     M.Data := @Proc;
-    TThread.StaticSynchronize(nil, TThreadMethod(M));
+    StaticSynchronize(TThreadMethod(M));
   end;
 end;
 
