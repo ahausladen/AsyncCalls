@@ -13,7 +13,7 @@
 { The Original Code is AsyncCalls.pas.                                                             }
 {                                                                                                  }
 { The Initial Developer of the Original Code is Andreas Hausladen.                                 }
-{ Portions created by Andreas Hausladen are Copyright (C) 2006-2008 Andreas Hausladen.             }
+{ Portions created by Andreas Hausladen are Copyright (C) 2006-2009 Andreas Hausladen.             }
 { All Rights Reserved.                                                                             }
 {                                                                                                  }
 { Contributor(s):                                                                                  }
@@ -86,7 +86,7 @@ type
 
   TAsyncCallArgObjectProc = function(Arg: TObject): Integer;
   TAsyncCallArgIntegerProc = function(Arg: Integer): Integer;
-  TAsyncCallArgStringProc = function(const Arg: AnsiString): Integer;
+  TAsyncCallArgStringProc = function(const Arg: string): Integer;
   TAsyncCallArgWideStringProc = function(const Arg: WideString): Integer;
   TAsyncCallArgInterfaceProc = function(const Arg: IInterface): Integer;
   TAsyncCallArgExtendedProc = function(const Arg: Extended): Integer;
@@ -94,7 +94,7 @@ type
 
   TAsyncCallArgObjectMethod = function(Arg: TObject): Integer of object;
   TAsyncCallArgIntegerMethod = function(Arg: Integer): Integer of object;
-  TAsyncCallArgStringMethod = function(const Arg: AnsiString): Integer of object;
+  TAsyncCallArgStringMethod = function(const Arg: string): Integer of object;
   TAsyncCallArgWideStringMethod = function(const Arg: WideString): Integer of object;
   TAsyncCallArgInterfaceMethod = function(const Arg: IInterface): Integer of object;
   TAsyncCallArgExtendedMethod = function(const Arg: Extended): Integer of object;
@@ -102,7 +102,7 @@ type
 
   TAsyncCallArgObjectEvent = procedure(Arg: TObject) of object;
   TAsyncCallArgIntegerEvent = procedure(Arg: Integer) of object;
-  TAsyncCallArgStringEvent = procedure(const Arg: AnsiString) of object;
+  TAsyncCallArgStringEvent = procedure(const Arg: string) of object;
   TAsyncCallArgWideStringEvent = procedure(const Arg: WideString) of object;
   TAsyncCallArgInterfaceEvent = procedure(const Arg: IInterface) of object;
   TAsyncCallArgExtendedEvent = procedure(const Arg: Extended) of object;
@@ -176,7 +176,7 @@ Example:
 }
 function AsyncCall(Proc: TAsyncCallArgObjectProc; Arg: TObject): IAsyncCall; overload;
 function AsyncCall(Proc: TAsyncCallArgIntegerProc; Arg: Integer): IAsyncCall; overload;
-function AsyncCall(Proc: TAsyncCallArgStringProc; const Arg: AnsiString): IAsyncCall; overload;
+function AsyncCall(Proc: TAsyncCallArgStringProc; const Arg: string): IAsyncCall; overload;
 function AsyncCall(Proc: TAsyncCallArgWideStringProc; const Arg: WideString): IAsyncCall; overload;
 function AsyncCall(Proc: TAsyncCallArgInterfaceProc; const Arg: IInterface): IAsyncCall; overload;
 function AsyncCall(Proc: TAsyncCallArgExtendedProc; const Arg: Extended): IAsyncCall; overload;
@@ -184,7 +184,7 @@ function AsyncCallVar(Proc: TAsyncCallArgVariantProc; const Arg: Variant): IAsyn
 
 function AsyncCall(Method: TAsyncCallArgObjectMethod; Arg: TObject): IAsyncCall; overload;
 function AsyncCall(Method: TAsyncCallArgIntegerMethod; Arg: Integer): IAsyncCall; overload;
-function AsyncCall(Method: TAsyncCallArgStringMethod; const Arg: AnsiString): IAsyncCall; overload;
+function AsyncCall(Method: TAsyncCallArgStringMethod; const Arg: string): IAsyncCall; overload;
 function AsyncCall(Method: TAsyncCallArgWideStringMethod; const Arg: WideString): IAsyncCall; overload;
 function AsyncCall(Method: TAsyncCallArgInterfaceMethod; const Arg: IInterface): IAsyncCall; overload;
 function AsyncCall(Method: TAsyncCallArgExtendedMethod; const Arg: Extended): IAsyncCall; overload;
@@ -192,7 +192,7 @@ function AsyncCallVar(Method: TAsyncCallArgVariantMethod; const Arg: Variant): I
 
 function AsyncCall(Method: TAsyncCallArgObjectEvent; Arg: TObject): IAsyncCall; overload;
 function AsyncCall(Method: TAsyncCallArgIntegerEvent; Arg: Integer): IAsyncCall; overload;
-function AsyncCall(Method: TAsyncCallArgStringEvent; const Arg: AnsiString): IAsyncCall; overload;
+function AsyncCall(Method: TAsyncCallArgStringEvent; const Arg: string): IAsyncCall; overload;
 function AsyncCall(Method: TAsyncCallArgWideStringEvent; const Arg: WideString): IAsyncCall; overload;
 function AsyncCall(Method: TAsyncCallArgInterfaceEvent; const Arg: IInterface): IAsyncCall; overload;
 function AsyncCall(Method: TAsyncCallArgExtendedEvent; const Arg: Extended): IAsyncCall; overload;
@@ -331,6 +331,7 @@ Supported types:
   Object       :  [const] Arg: TObject
   Class        :  [const] Arg: TClass
   AnsiString   :  [const] Arg: AnsiString
+  UnicodeString:  [const] Arg: UnicodeString
   PWideChar    :  [const] Arg: PWideChar
   WideString   :  [const] Arg: WideString
   Interface    :  [const] Arg: IInterface
@@ -802,11 +803,11 @@ type
   TAsyncCallArgString = class(TAsyncCall)
   private
     FProc: TAsyncCallArgStringProc;
-    FArg: AnsiString;
+    FArg: string;
   protected
     function ExecuteAsyncCall: Integer; override;
   public
-    constructor Create(AProc: TAsyncCallArgStringProc; const AArg: AnsiString);
+    constructor Create(AProc: TAsyncCallArgStringProc; const AArg: string);
   end;
 
   TAsyncCallArgWideString = class(TAsyncCall)
@@ -898,11 +899,11 @@ type
   TAsyncCallMethodArgString = class(TAsyncCall)
   private
     FProc: TAsyncCallArgStringMethod;
-    FArg: AnsiString;
+    FArg: string;
   protected
     function ExecuteAsyncCall: Integer; override;
   public
-    constructor Create(AProc: TAsyncCallArgStringMethod; const AArg: AnsiString);
+    constructor Create(AProc: TAsyncCallArgStringMethod; const AArg: string);
   end;
 
   TAsyncCallMethodArgWideString = class(TAsyncCall)
@@ -1011,7 +1012,7 @@ begin
   Result := AsyncCall(TAsyncCallArgObjectProc(Proc), TObject(Arg));
 end;
 
-function AsyncCall(Proc: TAsyncCallArgStringProc; const Arg: AnsiString): IAsyncCall;
+function AsyncCall(Proc: TAsyncCallArgStringProc; const Arg: string): IAsyncCall;
 begin
   { Execute the function synchron if no thread pool exists }
   if ThreadPool.MaxThreads = 0 then
@@ -1072,7 +1073,7 @@ begin
   Result := AsyncCall(TAsyncCallArgObjectMethod(Method), TObject(Arg));
 end;
 
-function AsyncCall(Method: TAsyncCallArgStringMethod; const Arg: AnsiString): IAsyncCall;
+function AsyncCall(Method: TAsyncCallArgStringMethod; const Arg: string): IAsyncCall;
 begin
   { Execute the function synchron if no thread pool exists }
   if ThreadPool.MaxThreads = 0 then
@@ -1129,7 +1130,7 @@ begin
   Result := AsyncCall(TAsyncCallArgIntegerMethod(Method), Arg);
 end;
 
-function AsyncCall(Method: TAsyncCallArgStringEvent; const Arg: AnsiString): IAsyncCall;
+function AsyncCall(Method: TAsyncCallArgStringEvent; const Arg: string): IAsyncCall;
 begin
   Result := AsyncCall(TAsyncCallArgStringMethod(Method), Arg);
 end;
@@ -1983,6 +1984,9 @@ begin
     case V.VType of
       vtAnsiString: AnsiString(V.VAnsiString) := '';
       vtWideString: WideString(V.VWideString) := '';
+      {$IFDEF UNICODE}
+      vtUnicodeString: UnicodeString(V.VUnicodeString) := '';
+      {$ENDIF UNICODE}
       vtInterface : IInterface(V.VInterface) := nil;
 
       vtString    : Dispose(V.VString);
@@ -1998,7 +2002,8 @@ end;
 function TAsyncCallArrayOfConst.CopyVarRec(const Data: TVarRec): TVarRec;
 begin
   if (Data.VPointer <> nil) and
-     (Data.VType in [vtString, vtAnsiString, vtWideString, vtExtended,
+     (Data.VType in [vtString, vtAnsiString, vtWideString,
+                     {$IFDEF UNICODE}vtUnicodeString,{$ENDIF} vtExtended,
                      vtCurrency, vtInt64, vtVariant, vtInterface]) then
   begin
     Result.VType := Data.VType;
@@ -2009,6 +2014,9 @@ begin
     case Result.VType of
       vtAnsiString: AnsiString(Result.VAnsiString) := AnsiString(Data.VAnsiString);
       vtWideString: WideString(Result.VWideString) := WideString(Data.VWideString);
+      {$IFDEF UNICODE}
+      vtUnicodeString: UnicodeString(Result.VUnicodeString) := UnicodeString(data.VUnicodeString);
+      {$ENDIF UNICODE}
       vtInterface : IInterface(Result.VInterface) := IInterface(Data.VInterface);
 
       vtString    : begin New(Result.VString);   Result.VString^ := Data.VString^; end;
@@ -2095,6 +2103,7 @@ begin
       vtObject,      // [const] Arg: TObject
       vtClass,       // [const] Arg: TClass
       vtAnsiString,  // [const] Arg: AnsiString
+      vtunicodeString,// [const] Arg: UnicodeString
       vtPWideChar,   // [const] Arg: PWideChar
       vtVariant,     // const Arg: Variant
       vtInterface,   // [const]: IInterface
@@ -2179,7 +2188,7 @@ end;
 { TAsyncCallArgString }
 
 constructor TAsyncCallArgString.Create(AProc: TAsyncCallArgStringProc;
-  const AArg: AnsiString);
+  const AArg: string);
 begin
   inherited Create;
   FProc := AProc;
@@ -2194,7 +2203,7 @@ end;
 { ---------------------------------------------------------------------------- }
 { TAsyncCallMethodArgString }
 
-constructor TAsyncCallMethodArgString.Create(AProc: TAsyncCallArgStringMethod; const AArg: AnsiString);
+constructor TAsyncCallMethodArgString.Create(AProc: TAsyncCallArgStringMethod; const AArg: string);
 begin
   inherited Create;
   FProc := AProc;
