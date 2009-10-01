@@ -56,6 +56,10 @@ interface
   {$IF CompilerVersion >= 20.0}
     {$DEFINE DELPHI2009_UP}
   {$IFEND}
+
+  {$IF CompilerVersion >= 21.0}
+    {$DEFINE DELPHI2010_UP}
+  {$IFEND}
 {$ENDIF}
 
 {$IFDEF DEBUG_ASYNCCALLS}
@@ -689,11 +693,11 @@ end;
 
 procedure StaticSynchronize(AMethod: TThreadMethod);
 begin
-  {$IF CompilerVersion >= 21.0}
+  {$IFDEF DELPHI2010_UP}
   TThread.Synchronize(nil, AMethod);
   {$ELSE}
   TThread.StaticSynchronize(nil, AMethod);
-  {$IFEND}
+  {$ENDIF DELPHI2010_UP}
 end;
 
 {$IFDEF DELPHI5}
@@ -1726,11 +1730,11 @@ begin
   Result := TAsyncCallThread.Create(True);
   Result.FreeOnTerminate := True;
   FThreads.Add(Result);
-  {$IF CompilerVersion >= 21.0}
+  {$IFDEF DELPHI2010_UP}
   Result.Start;
   {$ELSE}
   Result.Resume;
-  {$IFEND}
+  {$ENDIF DELPHI2010_UP}
 end;
 
 const
@@ -2103,7 +2107,9 @@ begin
       vtObject,      // [const] Arg: TObject
       vtClass,       // [const] Arg: TClass
       vtAnsiString,  // [const] Arg: AnsiString
-      vtunicodeString,// [const] Arg: UnicodeString
+      {$IFDEF DELPHI2009_UP}
+      vtUnicodeString,// [const] Arg: UnicodeString
+      {$ENDIF DELPHI2009_UP}
       vtPWideChar,   // [const] Arg: PWideChar
       vtVariant,     // const Arg: Variant
       vtInterface,   // [const]: IInterface
