@@ -13,7 +13,7 @@
 { The Original Code is AsyncCalls.pas.                                                             }
 {                                                                                                  }
 { The Initial Developer of the Original Code is Andreas Hausladen.                                 }
-{ Portions created by Andreas Hausladen are Copyright (C) 2006-2009 Andreas Hausladen.             }
+{ Portions created by Andreas Hausladen are Copyright (C) 2006-2010 Andreas Hausladen.             }
 { All Rights Reserved.                                                                             }
 {                                                                                                  }
 { Contributor(s):                                                                                  }
@@ -622,7 +622,7 @@ type
     class function Invoke<T1, T2, T3, T4>(Proc: TAsyncCallArgGenericProc<T1, T2, T3, T4>; const Arg1: T1; const Arg2: T2; const Arg3: T3; const Arg4: T4): IAsyncCall; overload; static;
     class function Invoke<T1, T2, T3, T4>(Event: TAsyncCallArgGenericMethod<T1, T2, T3, T4>; const Arg1: T1; const Arg2: T2; const Arg3: T3; const Arg4: T4): IAsyncCall; overload; static;
 
-    { Invoke an asynchronouse anonymous method call }
+    { Invoke an asynchronous anonymous method call }
     class function Invoke(Func: TIntFunc): IAsyncCall; overload; static;
     class function Invoke(Proc: TProc): IAsyncCall; overload; static;
 
@@ -636,7 +636,7 @@ type
 
     { VCLSync returns when the anonymous method was called in the main thread }
     class procedure VCLSync(Proc: TProc); static;
-    { VCLInvoke return immediately. The anonymous method will be executed in
+    { VCLInvoke returns immediately. The anonymous method will be executed in
       the main thread. }
     class function VCLInvoke(Proc: TProc): IAsyncCall; static;
   end;
@@ -2107,9 +2107,9 @@ begin
       vtObject,      // [const] Arg: TObject
       vtClass,       // [const] Arg: TClass
       vtAnsiString,  // [const] Arg: AnsiString
-      {$IFDEF DELPHI2009_UP}
-      vtUnicodeString,// [const] Arg: UnicodeString
-      {$ENDIF DELPHI2009_UP}
+      {$IFDEF UNICODE}
+      vtUnicodeString, // [const] Arg: UnicodeString
+      {$ENDIF UNICODE}
       vtPWideChar,   // [const] Arg: PWideChar
       vtVariant,     // const Arg: Variant
       vtInterface,   // [const]: IInterface
