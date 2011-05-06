@@ -1859,15 +1859,23 @@ begin
   try
     Value := ExecuteAsyncCall;
   except
-    FFatalErrorAddr := ErrorAddr;
+    FFatalErrorAddr := ExceptAddr;
     FFatalException := AcquireExceptionObject;
   end;
   Quit(Value);
 end;
 
 procedure TAsyncCall.InternExecuteSyncCall;
+var
+  Value: Integer;
 begin
-  Quit( ExecuteAsyncCall() );
+  Value := 0;
+  try
+    Value := ExecuteAsyncCall();
+  finally
+    // Let the exception be handled by the caller because we are in sync with it
+    Quit(Value);
+  end;
 end;
 
 procedure TAsyncCall.Quit(AReturnValue: Integer);
