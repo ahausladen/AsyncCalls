@@ -766,6 +766,8 @@ type
   {$ENDIF DEBUG_THREADSTATS}
   protected
     procedure Execute; override;
+  public
+    constructor Create(ACreateSuspended: Boolean);
   end;
 
   { TThreadPool contains a pool of threads that are either suspended or busy. }
@@ -996,7 +998,7 @@ type
     FProc: function: Integer register;
     FArgs: array of TVarRec;
   protected
-    function CopyVarRec(const Data: TVarRec): TVarRec;
+    procedure CopyVarRec(const Data: TVarRec; var Result: TVarRec);
     function ExecuteAsyncCall: Integer; override;
   public
     constructor Create(AProc: Pointer; const AArgs: array of const); overload;
@@ -1585,6 +1587,12 @@ begin
   MainWnd := wnd;
 end;
 
+constructor TAsyncCallThread.Create(ACreateSuspended: Boolean);
+begin
+  inherited Create(ACreateSuspended);
+  Priority := tpHigher; // faster initial start of the thread. Is revoked after getting an IAsyncCall request
+end;
+
 procedure TAsyncCallThread.Execute;
 var
   FAsyncCall: TAsyncCall;
@@ -1593,11 +1601,16 @@ var
   Start, Stop: Int64;
   {$ENDIF DEBUG_THREADSTATS}
 begin
-  CoInitialized := CoInitialize(nil) = S_OK;
+  CoInitialized := False;
+  case CoInitialize(nil) of
+    S_OK, S_FALSE:
+      CoInitialized := True;
+  end;
   try
     while True do
     begin
       FAsyncCall := ThreadPool.GetNextAsyncCall; // calls Sleep if nothing has to be done
+      Priority := tpNormal;
       if FAsyncCall <> nil then
       begin
         {$IFDEF DEBUG_THREADSTATS}
@@ -1620,7 +1633,7 @@ begin
       else if Terminated then
       begin
         { Thread will quit if the application terminates and no further task is in the queue. }
-        FAsyncCall := ThreadPool.GetNextAsyncCall; // Doesn't call go to sleep due to signaled ThreadPool.FThreadTerminateEvent
+        FAsyncCall := ThreadPool.GetNextAsyncCall; // Doesn't go to sleep due to signaled ThreadPool.FThreadTerminateEvent
         if FAsyncCall = nil then
           Break;
       end;
@@ -1643,9 +1656,7 @@ begin
   FMainThreadSyncEvent := CreateEvent(nil, False, False, nil);
   FWakeUpEvent := CreateEvent(nil, False, False, nil);
   FThreadTerminateEvent := CreateEvent(nil, True, False, nil);
-
-  // A spin count of 400 should be enough unless RemoveAsyncCall is called.
-  InitializeCriticalSectionAndSpinCount(FAsyncCallsCritSect, 400);
+  InitializeCriticalSectionAndSpinCount(FAsyncCallsCritSect, 4000);
 
   GetSystemInfo(SysInfo);
   FNumberOfProcessors := SysInfo.dwNumberOfProcessors;
@@ -1798,14 +1809,19 @@ begin
 end;
 
 procedure TThreadPool.Sleep;
+// Wait for the wake up call from WakeUpThread
 var
   Handles: array[0..1] of THandle;
 begin
   Handles[0] := FWakeUpEvent;
   Handles[1] := FThreadTerminateEvent;
-  // Wait for the wake up call from WakeUpThread
+
   InterlockedIncrement(FSleepingThreadCount);
+
+  SetThreadPriority(GetCurrentThread, THREAD_PRIORITY_ABOVE_NORMAL); // wake up faster
   WaitForMultipleObjects(2, @Handles, False, INFINITE);
+  //SetThreadPriority(GetCurrentThread, THREAD_PRIORITY_NORMAL);  done in TAsyncThread.Execute
+
   InterlockedDecrement(FSleepingThreadCount);
 end;
 
@@ -2032,7 +2048,7 @@ begin
   FProc := AProc;
   SetLength(FArgs, Length(AArgs));
   for I := 0 to High(AArgs) do
-    FArgs[I] := CopyVarRec(AArgs[I]);
+    CopyVarRec(AArgs[I], FArgs[I]);
 end;
 
 constructor TAsyncCallArrayOfConst.Create(AProc: Pointer; MethodData: TObject; const AArgs: array of const);
@@ -2048,7 +2064,7 @@ begin
   FArgs[0].VObject := MethodData;
 
   for I := 0 to High(AArgs) do
-    FArgs[I + 1] := CopyVarRec(AArgs[I]);
+    CopyVarRec(AArgs[I], FArgs[I + 1]);
 end;
 
 destructor TAsyncCallArrayOfConst.Destroy;
@@ -2077,7 +2093,7 @@ begin
   inherited Destroy;
 end;
 
-function TAsyncCallArrayOfConst.CopyVarRec(const Data: TVarRec): TVarRec;
+procedure TAsyncCallArrayOfConst.CopyVarRec(const Data: TVarRec; var Result: TVarRec);
 begin
   if (Data.VPointer <> nil) and
      (Data.VType in [vtString, vtAnsiString, vtWideString,
