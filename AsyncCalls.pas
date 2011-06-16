@@ -481,7 +481,7 @@ type
     function ExecuteAsync: TAsyncCall;
     function SyncInThisThreadIfPossible: Boolean;
 
-    function GetEvent: Cardinal;
+    function GetEvent: THandle;
 
     function Sync: Integer;
     function Finished: Boolean;
@@ -1922,7 +1922,7 @@ begin
   FForceDifferentThread := True;
 end;
 
-function TAsyncCall.GetEvent: Cardinal;
+function TAsyncCall.GetEvent: THandle;
 begin
   Result := FEvent;
 end;
