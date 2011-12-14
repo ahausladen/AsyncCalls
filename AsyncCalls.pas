@@ -141,7 +141,7 @@ type
       AsyncCall invocation was canceled. }
     function ReturnValue: Integer;
 
-    { Canceled() returns True if the AsynCall was canceled by CancelInvocation(). }
+    { Canceled() returns True if the AsyncCall was canceled by CancelInvocation(). }
     function Canceled: Boolean;
 
     { ForceDifferentThread() tells AsyncCalls that the assigned function must
@@ -1950,7 +1950,7 @@ begin
     else
     begin
       { There is no way to find out if the FAutoDelete code in TAsyncCallThread.Execute was
-        already executed or not, so release the the calls the next time GetNextAsyncCall is
+        already executed or not, so release FCall the next time GetNextAsyncCall is
         called. }
       Call.FNext := FAutoDeleteAsyncCalls;
       FAutoDeleteAsyncCalls := Call;
