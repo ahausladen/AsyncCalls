@@ -13,7 +13,7 @@
 { The Original Code is AsyncCalls.pas.                                                             }
 {                                                                                                  }
 { The Initial Developer of the Original Code is Andreas Hausladen.                                 }
-{ Portions created by Andreas Hausladen are Copyright (C) 2006-2011 Andreas Hausladen.             }
+{ Portions created by Andreas Hausladen are Copyright (C) 2006-2016 Andreas Hausladen.             }
 { All Rights Reserved.                                                                             }
 {                                                                                                  }
 { Contributor(s):                                                                                  }
@@ -487,21 +487,22 @@ type
   TAsyncCall = class;
 
   { *** Internal class. Do not use it *** }
-  { TAsyncCall is the base class for all parameter based async call types }
+  { TInternalAsyncCall is the base class for all parameter based async call types }
   TInternalAsyncCall = class(TObject)
   private
     FNext: TInternalAsyncCall;
 
     FEvent: THandle;
-    FReturnValue: Integer;
-    FFinished: Boolean;
     FFatalException: Exception;
     FFatalErrorAddr: Pointer;
+
+    FRefCount: Integer;    
+    FReturnValue: Integer;
     FForceDifferentThread: Boolean;
     FCancelInvocation: Boolean;
     FCanceled: Boolean;
     FExecuted: Boolean;
-    FAutoDelete: Boolean;
+    FFinished: Boolean;
 
     procedure InternExecuteAsyncCall;
     procedure InternExecuteSyncCall;
@@ -512,6 +513,9 @@ type
     function ExecuteAsyncCall: Integer; virtual; abstract;
   private
     constructor Create;
+    procedure AddRef;
+    procedure Release;
+
     function ExecuteAsync: TAsyncCall;
 
     function GetEvent: THandle;
@@ -728,6 +732,7 @@ resourcestring
 
 const
   WM_VCLSYNC = WM_USER + 12;
+  WM_RAISEEXCEPTION = WM_USER + 13;
 
 {$IFNDEF DELPHI7_UP}
 var
@@ -860,7 +865,6 @@ type
 
     FAsyncCallsCritSect: TRTLCriticalSection;
     FAsyncCallHead, FAsyncCallTail: TInternalAsyncCall;
-    FAutoDeleteAsyncCalls: TInternalAsyncCall;
 
     FNumberOfProcessors: Cardinal;
     {$IFDEF DEBUG_THREADSTATS}
@@ -877,8 +881,6 @@ type
 
     procedure WakeUpThread;
     procedure Sleep;
-    procedure ReleaseAutoDeleteAsyncCalls;
-    procedure CheckAutoDelete(Call: TInternalAsyncCall);
   public
     constructor Create;
     destructor Destroy; override;
@@ -888,7 +890,6 @@ type
 
     procedure AddAsyncCall(Call: TInternalAsyncCall);
     function RemoveAsyncCall(Call: TInternalAsyncCall): Boolean;
-    procedure ForgetAsyncCall(Call: TInternalAsyncCall);
 
     property MaxThreads: Integer read FMaxThreads;
     property NumberOfProcessors: Cardinal read FNumberOfProcessors;
@@ -1734,7 +1735,7 @@ begin
       end;
 
       if FAsyncCall <> nil then
-        ThreadPool.CheckAutoDelete(FAsyncCall);
+        FAsyncCall.Release;
     end;
   finally
     if CoInitialized then
@@ -1767,6 +1768,7 @@ destructor TThreadPool.Destroy;
 var
   I: Integer;
   Call: TInternalAsyncCall;
+  Msg: TMsg;
 begin
   FMaxThreads := FThreadCount; // Do not allocation new threads
   FDestroying := True; // => Sync in this thread because there is no other thread (required for FAsnycCallHead.Free)
@@ -1779,20 +1781,24 @@ begin
   // Wait and destroy the threads
   for I := FThreadCount - 1 downto 0 do
     FThreads[I].Free;
-  ReleaseAutoDeleteAsyncCalls;
 
-  // Clean up not yet released AutoDelete InternalAsyncCalls.
+  // Clean up not yet released TInternalAsyncCalls objects
   while FAsyncCallHead <> nil do
   begin
     Call := FAsyncCallHead.FNext;
-    CheckAutoDelete(FAsyncCallHead);
+    FAsyncCallHead.Release;
     FAsyncCallHead := Call;
   end;
+
+  // Handle pending FatalExceptions from "forgotten" async calls
+  while PeekMessage(Msg, FMainThreadVclHandle, WM_RAISEEXCEPTION, WM_RAISEEXCEPTION, PM_REMOVE or PM_NOYIELD) do
+    DispatchMessage(Msg);
 
   CloseHandle(FThreadTerminateEvent);
   CloseHandle(FWakeUpEvent);
   CloseHandle(FMainThreadSyncEvent);
   DeallocateHWnd(FMainThreadVclHandle);
+  FMainThreadVclHandle := 0;
   DeleteCriticalSection(FAsyncCallsCritSect);
 
   inherited Destroy;
@@ -1805,57 +1811,12 @@ begin
     raise EAsyncCallError.CreateRes(@RsNoVclSyncPossible);
 end;
 
-procedure TThreadPool.CheckAutoDelete(Call: TInternalAsyncCall);
-var
-  AutoDelete: Boolean;
-begin
-  EnterCriticalSection(FAsyncCallsCritSect); // spinning
-  try
-    AutoDelete := Call.FAutoDelete;
-  finally
-    LeaveCriticalSection(FAsyncCallsCritSect);
-  end;
-  if AutoDelete then
-  begin
-    try
-      Call.Sync; // throw exception if one is to throw
-    except
-      if Assigned(ApplicationHandleException) then
-        ApplicationHandleException(Self);
-    end;
-    Call.Free;
-  end;
-end;
-
-procedure TThreadPool.ReleaseAutoDeleteAsyncCalls;
-var
-  ItemP: ^TInternalAsyncCall;
-  Next: TInternalAsyncCall;
-begin
-  EnterCriticalSection(FAsyncCallsCritSect); // spinning
-  try
-    ItemP := @FAutoDeleteAsyncCalls;
-    while ItemP^ <> nil do
-    begin
-      Next := ItemP^.FNext;
-      try
-        ItemP^.Sync; // throw raised exceptions here
-      finally
-        ItemP^.Free;
-        ItemP^ := Next;
-      end;
-    end;
-  finally
-    LeaveCriticalSection(FAsyncCallsCritSect);
-  end;
-end;
-
 function TThreadPool.GetNextAsyncCall: TInternalAsyncCall;
 begin
   { Dequeue }
   EnterCriticalSection(FAsyncCallsCritSect); // spinning
   try
-    ReleaseAutoDeleteAsyncCalls;
+    // Skip reference count handling, because we would increment (Result) and decrement (ListRemove) it.
     { Get the "oldest" async call }
     Result := FAsyncCallHead;
     if FAsyncCallHead <> nil then
@@ -1902,6 +1863,8 @@ begin
         Result := True;
       end;
     end;
+    if Result then
+      Call.Release;
   finally
     LeaveCriticalSection(FAsyncCallsCritSect);
   end;
@@ -1909,6 +1872,7 @@ end;
 
 procedure TThreadPool.AddAsyncCall(Call: TInternalAsyncCall);
 begin
+  Call.AddRef;
   { Enqueue }
   EnterCriticalSection(FAsyncCallsCritSect); // spinning
   if FAsyncCallTail = nil then
@@ -1933,31 +1897,6 @@ begin
 
   { Wake up one of the sleeping threads. }
   WakeUpThread;
-end;
-
-procedure TThreadPool.ForgetAsyncCall(Call: TInternalAsyncCall);
-var
-  Item: TInternalAsyncCall;
-begin
-  // Assert(Call.FRefCount > 0);
-  EnterCriticalSection(FAsyncCallsCritSect); // spinning, but we may take too much time
-  try
-    Item := FAsyncCallHead;
-    while (Item <> nil) and (Item <> Call) do
-      Item := Item.FNext;
-    if Item <> nil then
-      Call.FAutoDelete := True // it is still safe to set FAutoDelete
-    else
-    begin
-      { There is no way to find out if the FAutoDelete code in TAsyncCallThread.Execute was
-        already executed or not, so release FCall the next time GetNextAsyncCall is
-        called. }
-      Call.FNext := FAutoDeleteAsyncCalls;
-      FAutoDeleteAsyncCalls := Call;
-    end
-  finally
-    LeaveCriticalSection(FAsyncCallsCritSect);
-  end;
 end;
 
 procedure TThreadPool.AllocThread;
@@ -2008,11 +1947,18 @@ end;
 
 procedure TThreadPool.MainThreadWndProc(var Msg: TMessage);
 begin
-  case Msg.Msg of
-    WM_VCLSYNC:
-      TInternalAsyncCall(Msg.LParam).InternExecuteSyncCall;
-  else
-    Msg.Result := DefWindowProc(FMainThreadVclHandle, Msg.Msg, Msg.WParam, Msg.LParam);
+  try
+    case Msg.Msg of
+      WM_VCLSYNC:
+        TInternalAsyncCall(Msg.LParam).InternExecuteSyncCall;
+      WM_RAISEEXCEPTION:
+        raise Exception(Msg.LParam) at Pointer(Msg.WParam);
+    else
+      Msg.Result := DefWindowProc(FMainThreadVclHandle, Msg.Msg, Msg.WParam, Msg.LParam);
+    end;
+  except
+    if Assigned(ApplicationHandleException) then
+      ApplicationHandleException(Self);
   end;
 end;
 
@@ -2082,12 +2028,19 @@ destructor TInternalAsyncCall.Destroy;
 begin
   if FEvent <> 0 then
   begin
-    try
-      Sync;
-    finally
-      CloseHandle(FEvent);
-      FEvent := 0;
-    end;
+    CloseHandle(FEvent);
+    FEvent := 0;
+  end;
+  // TAsyncCall.Destroy either already called Sync() or we are a "forgotten" async call
+  // and we need to handle the exception ourself by trying to throw it in the main thread
+  // or just ignoring it.
+  if FFatalException <> nil then
+  begin
+    if Assigned(ApplicationHandleException) and
+       (ThreadPool.FMainThreadVclHandle <> 0) and IsWindow(ThreadPool.FMainThreadVclHandle) then
+      PostMessage(ThreadPool.FMainThreadVclHandle, WM_RAISEEXCEPTION, WPARAM(FFatalErrorAddr), LPARAM(FFatalException))
+    else
+      FFatalException.Free;
   end;
   inherited Destroy;
 end;
@@ -2108,7 +2061,6 @@ end;
 procedure TInternalAsyncCall.Forget;
 begin
   ForceDifferentThread;
-  ThreadPool.ForgetAsyncCall(Self);
 end;
 
 function TInternalAsyncCall.Canceled: Boolean;
@@ -2224,6 +2176,8 @@ end;
 
 function TInternalAsyncCall.SyncInThisThreadIfPossible: Boolean;
 begin
+  // AddRef/Release protection isn't needed here because SyncInThisThreadIfPossible
+  // is only called from an TAsynCall instance that holds a reference.
   if not Finished then
   begin
     Result := False;
@@ -2250,6 +2204,17 @@ end;
 
 { ---------------------------------------------------------------------------- }
 {$IFDEF SUPPORT_LOCAL_FUNCTIONS}
+procedure TInternalAsyncCall.AddRef;
+begin
+  InterlockedIncrement(FRefCount);
+end;
+
+procedure TInternalAsyncCall.Release;
+begin
+  if InterlockedDecrement(FRefCount) = 0 then
+    Destroy;
+end;
+
 { TAsyncCallArrayOfConst }
 
 constructor TAsyncCallArrayOfConst.Create(AProc: Pointer; const AArgs: array of const);
@@ -3356,6 +3321,7 @@ end;
 constructor TAsyncCall.Create(ACall: TInternalAsyncCall);
 begin
   inherited Create;
+  ACall.AddRef;
   FCall := ACall;
 end;
 
@@ -3366,7 +3332,7 @@ begin
     try
       FCall.Sync; // throw raised exceptions here
     finally
-      FCall.Free;
+      FCall.Release;
     end;
   end;
   inherited Destroy;
@@ -3392,6 +3358,7 @@ begin
   C := FCall;
   FCall := nil;
   C.Forget;
+  C.Release;
 end;
 
 function TAsyncCall.ReturnValue: Integer;
