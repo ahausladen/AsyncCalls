@@ -443,13 +443,13 @@ function MsgAsyncMultiSync(const List: array of IAsyncCall; WaitAll: Boolean;
 function MsgAsyncMultiSyncEx(const List: array of IAsyncCall; const Handles: array of THandle;
   WaitAll: Boolean; Milliseconds: Cardinal; dwWakeMask: DWORD): Cardinal;
 
-{$IFDEF SUPPORT_LOCAL_FUNCTIONS}  
+{$IFDEF SUPPORT_LOCAL_FUNCTIONS}
 {
    EnterMainThread/LeaveMainThread can be used to temporary switch to the
    main thread. The code that should be synchonized (blocking) has to be put
    into a try/finally block and the LeaveMainThread() function must be called
    from the finally block. A missing try/finally will lead to an access violation.
-   
+
    * All local variables can be used. (EBP points to the thread's stack while
      ESP points the the main thread's stack)
    * Unhandled exceptions are passed to the surrounding thread.
@@ -563,6 +563,7 @@ type
     FReturnValue: Integer;
   private
     constructor Create(AReturnValue: Integer);
+    { IAsyncCall }
     function Sync: Integer;
     function Finished: Boolean;
     function ReturnValue: Integer;
@@ -1804,7 +1805,6 @@ begin
   inherited Destroy;
 end;
 
-
 procedure TThreadPool.CheckDestroying;
 begin
   if FDestroying then
@@ -1863,17 +1863,18 @@ begin
         Result := True;
       end;
     end;
-    if Result then
-      Call.Release;
   finally
     LeaveCriticalSection(FAsyncCallsCritSect);
   end;
+  if Result then
+    Call.Release; // removed from list
 end;
 
 procedure TThreadPool.AddAsyncCall(Call: TInternalAsyncCall);
 begin
-  Call.AddRef;
   { Enqueue }
+  Call.AddRef; // added to list
+
   EnterCriticalSection(FAsyncCallsCritSect); // spinning
   if FAsyncCallTail = nil then
   begin
@@ -2045,6 +2046,17 @@ begin
   inherited Destroy;
 end;
 
+procedure TInternalAsyncCall.AddRef;
+begin
+  InterlockedIncrement(FRefCount);
+end;
+
+procedure TInternalAsyncCall.Release;
+begin
+  if InterlockedDecrement(FRefCount) = 0 then
+    Destroy;
+end;
+
 function TInternalAsyncCall.Finished: Boolean;
 begin
   if FCanceled or (FCancelInvocation and not FExecuted) then
@@ -2198,23 +2210,12 @@ end;
 
 function TInternalAsyncCall.ExecuteAsync: TAsyncCall;
 begin
-  ThreadPool.AddAsyncCall(Self);
   Result := TAsyncCall.Create(Self);
+  ThreadPool.AddAsyncCall(Self);
 end;
 
 { ---------------------------------------------------------------------------- }
 {$IFDEF SUPPORT_LOCAL_FUNCTIONS}
-procedure TInternalAsyncCall.AddRef;
-begin
-  InterlockedIncrement(FRefCount);
-end;
-
-procedure TInternalAsyncCall.Release;
-begin
-  if InterlockedDecrement(FRefCount) = 0 then
-    Destroy;
-end;
-
 { TAsyncCallArrayOfConst }
 
 constructor TAsyncCallArrayOfConst.Create(AProc: Pointer; const AArgs: array of const);
@@ -2690,7 +2691,7 @@ asm
   mov eax, [eax].TLocalVclCallRec.Param
   push edx
   call ecx
-  pop ecx 
+  pop ecx
 end;
 
 procedure InternLocalVclCall(LocalProc: TLocalVclProc; Param: INT_PTR; BasePointer: Pointer);
@@ -3008,7 +3009,7 @@ asm
 
   { End try/finally }
 @@Finally:
-  { Restore thread registers } 
+  { Restore thread registers }
   mov eax, OFFSET MainThreadContext
   mov ebx, [eax].TMainThreadContext.ThreadRegEBX
   mov edi, [eax].TMainThreadContext.ThreadRegEDI
@@ -3330,7 +3331,7 @@ begin
   if FCall <> nil then
   begin
     try
-      FCall.Sync; // throw raised exceptions here
+      FCall.Sync; // throws raised exception
     finally
       FCall.Release;
     end;
@@ -3425,3 +3426,4 @@ finalization
   {$ENDIF ~DELPHi7_UP}
 
 end.
+
