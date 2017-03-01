@@ -858,6 +858,7 @@ type
     FWakeUpEvent: THandle;
     FThreadTerminateEvent: THandle;
     FSleepingThreadCount: Integer;
+    FEnqueuedCallCount: Integer;
     FMaxThreads: Integer;
     FDestroying: Boolean;
 
@@ -1819,6 +1820,8 @@ begin
     // Skip reference count handling, because we would increment (Result) and decrement (ListRemove) it.
     { Get the "oldest" async call }
     Result := FAsyncCallHead;
+    if Result <> nil then
+      Dec(FEnqueuedCallCount);
     if FAsyncCallHead <> nil then
       FAsyncCallHead := FAsyncCallHead.FNext;
     if Result = FAsyncCallTail then
@@ -1871,6 +1874,8 @@ begin
 end;
 
 procedure TThreadPool.AddAsyncCall(Call: TInternalAsyncCall);
+var
+  AvailableThreadCount: Integer;
 begin
   { Enqueue }
   Call.AddRef; // added to list
@@ -1886,10 +1891,13 @@ begin
     FAsyncCallTail.FNext := Call;
     FAsyncCallTail := Call;
   end;
+  AvailableThreadCount := FSleepingThreadCount - FEnqueuedCallCount;
+  Inc(FEnqueuedCallCount);
   LeaveCriticalSection(FAsyncCallsCritSect);
 
-  { All threads are busy, we need to allocate another thread if possible. }
-  if FSleepingThreadCount = 0 then
+  { We need to start another thread, if all threads are busy (not sleeping) or we have already
+    enqueued tasks for all sleeping thread. }
+  if AvailableThreadCount <= 0 then
   begin
     { Do an unsafe ThreadCount check. AllocThread will do a safe check if we were wrong here. }
     if FThreadCount < MaxThreads then
