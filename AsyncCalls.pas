@@ -1852,6 +1852,7 @@ begin
       FAsyncCallHead := Call.FNext;
       if FAsyncCallHead = nil then
         FAsyncCallTail := nil;
+      Dec(FEnqueuedCallCount);
       Result := True;
     end
     else
@@ -1863,6 +1864,7 @@ begin
         Item.FNext := Call.FNext;
         if Call = FAsyncCallTail then
           FAsyncCallTail := Item;
+        Dec(FEnqueuedCallCount);
         Result := True;
       end;
     end;
