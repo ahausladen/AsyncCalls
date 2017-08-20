@@ -2118,7 +2118,7 @@ begin
       FCanceled := True;
   except
     FFatalErrorAddr := ExceptAddr;
-    FFatalException := AcquireExceptionObject;
+    FFatalException := Exception(AcquireExceptionObject);
   end;
   Quit(Value);
 end;
@@ -2880,7 +2880,7 @@ asm
   { Detect if the finally block is called by System._HandleFinally.
     In that case an exception was raised in the MainThread-Block. The
     Classes.CheckSynchronize function will handle the exception and the
-    thread switch for us. This will also restore the EBP regíster. }
+    thread switch for us. This will also restore the EBP regÃ­ster. }
   mov eax, [esp + $04] // finally return address
   mov edx, OFFSET System.@HandleFinally
   cmp eax, edx
