@@ -1968,8 +1968,14 @@ begin
       Msg.Result := DefWindowProc(FMainThreadVclHandle, Msg.Msg, Msg.WParam, Msg.LParam);
     end;
   except
-    if Assigned(ApplicationHandleException) then
+  {$IFDEF DELPHI5}
+  if Assigned(Application) then
+    Application.HandleException(Self);
+  {$ELSE}
+  if Assigned(ApplicationHandleException) then
       ApplicationHandleException(Self);
+  {$ENDIF DELPHI5}
+
   end;
 end;
 
@@ -2047,7 +2053,9 @@ begin
   // or just ignoring it.
   if FFatalException <> nil then
   begin
-    if Assigned(ApplicationHandleException) and
+  {$IFDEF DELPHI5} if Assigned(Application) and
+           {$ELSE} if Assigned(ApplicationHandleException) and
+  {$ENDIF DELPHI5}
        (ThreadPool.FMainThreadVclHandle <> 0) and IsWindow(ThreadPool.FMainThreadVclHandle) then
       PostMessage(ThreadPool.FMainThreadVclHandle, WM_RAISEEXCEPTION, WPARAM(FFatalErrorAddr), LPARAM(FFatalException))
     else
